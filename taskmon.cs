@@ -38,6 +38,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -105,7 +106,48 @@ static class Native {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-    public const uint SWP_NOZORDER = 0x0004;
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    public const uint SWP_NOZORDER    = 0x0004;
+    public const int  WS_EX_LAYERED   = 0x00080000;
+    public const int  ULW_ALPHA       = 2;
+
+    // UpdateLayeredWindow -- renders a per-pixel-alpha bitmap onto the window.
+    // Background pixels use alpha=1 (visually transparent, still receive mouse input).
+    // Click-through only happens at alpha=0; alpha>=1 receives mouse events.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PTWIN  { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SZWIN  { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BLENDFUNCTION {
+        public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER {
+        public int   biSize, biWidth, biHeight;
+        public short biPlanes, biBitCount;
+        public int   biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter;
+        public int   biClrUsed, biClrImportant;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; public int bmiColors; }
+
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int    ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("user32.dll")]
+    public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst,
+        ref PTWIN pptDst, ref SZWIN psize, IntPtr hdcSrc, ref PTWIN pptSrc,
+        int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] public static extern bool   DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+    [DllImport("gdi32.dll")] public static extern bool   DeleteObject(IntPtr ho);
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO pbmi,
+        uint iUsage, out IntPtr ppvBits, IntPtr hSection, uint dwOffset);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -450,18 +492,18 @@ class DBPanel : Panel {
 public class OverlayForm : Form {
     public  Settings S;
     Metrics  _m;
-    DBPanel  _panel;
     internal System.Windows.Forms.Timer _timer;
     System.Windows.Forms.Timer _zTimer;
     ContextMenuStrip _menu;
+    NotifyIcon _notify;
     int _assertingZ;
 
     // Pre-allocated GDI resources -- created once in AllocGdi(), never in paint loop.
     Font       _fLbl, _fVal;
-    SolidBrush _bgBrush, _dimBrush, _coreBgBrush;
+    SolidBrush _dimBrush, _coreBgBrush;
     Pen        _divPen;
     Color      _cUp, _cDn, _cCpu, _cGpu, _cMem;
-    float[]    _buf = new float[60]; // scratch buffer for CopyTo inside paint
+    float[]    _buf = new float[60]; // scratch buffer for CopyTo inside UpdateLayer
 
     // -- Layout constants ------------------------------------------------------
     const int SW     = 70;  // standard section width (px)
@@ -477,18 +519,21 @@ public class OverlayForm : Form {
         StartPosition   = FormStartPosition.Manual;
         TopMost         = true;
         ShowInTaskbar   = false;
-        BackColor       = Color.FromArgb(0x1E, 0x1E, 0x1E);
-        TransparencyKey = BackColor;
-        Opacity         = Clamp01(s.Opacity);
-
-        _panel           = new DBPanel { Dock = DockStyle.Fill };
-        _panel.Paint    += DoPaint;
-        _panel.MouseDown += (o, e) => {
-            if (e.Button == MouseButtons.Right) _menu.Show(Cursor.Position);
+        BackColor       = Color.Black; // never painted; UpdateLayeredWindow owns the visual
+        // Suppress default WinForms painting -- our visual comes entirely from UpdateLayer().
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer, true);
+        MouseDown += (o, e) => {
+            if (e.Button == MouseButtons.Right) {
+                // SetForegroundWindow lets the menu's message filter detect outside
+                // clicks, so it auto-closes when the user clicks elsewhere.
+                Native.SetForegroundWindow(Handle);
+                _menu.Show(Cursor.Position);
+            }
         };
-        Controls.Add(_panel);
 
         BuildMenu();
+        BuildNotifyIcon();
         DoLayout();
 
         _timer = new System.Windows.Forms.Timer { Interval = Math.Max(250, s.UpdateIntervalMs) };
@@ -504,13 +549,13 @@ public class OverlayForm : Form {
     // WS_EX_TOOLWINDOW: keeps the overlay out of the Alt+Tab list.
     protected override CreateParams CreateParams { get {
         var p = base.CreateParams;
-        p.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW;
+        p.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW | Native.WS_EX_LAYERED;
         return p;
     }}
 
     void Tick() {
         _m.Sample();
-        _panel.Invalidate();
+        UpdateLayer();
     }
 
     void AssertTopmost() {
@@ -536,6 +581,8 @@ public class OverlayForm : Form {
         int x   = TrayLeftEdge(scr) - w;
         Size     = new Size(w, tbH);
         Location = new Point(x, scr.Bounds.Bottom - tbH);
+        // UpdateLayeredWindow encodes position and size, so re-render after any layout change.
+        if (IsHandleCreated) UpdateLayer();
     }
 
     protected override void OnShown(EventArgs e) {
@@ -579,12 +626,11 @@ public class OverlayForm : Form {
     }
 
     void AllocGdi() {
-        _fLbl      = new Font("Segoe UI", 6.5f, FontStyle.Regular, GraphicsUnit.Point);
-        _fVal      = new Font("Segoe UI", 7.5f, FontStyle.Bold,    GraphicsUnit.Point);
-        _bgBrush   = new SolidBrush(Color.FromArgb(0x1E, 0x1E, 0x1E));
-        _dimBrush  = new SolidBrush(Color.FromArgb(0x80, 0x80, 0x80));
+        _fLbl        = new Font("Segoe UI", 6.5f, FontStyle.Regular, GraphicsUnit.Point);
+        _fVal        = new Font("Segoe UI", 7.5f, FontStyle.Bold,    GraphicsUnit.Point);
+        _dimBrush    = new SolidBrush(Color.FromArgb(0x80, 0x80, 0x80));
         _coreBgBrush = new SolidBrush(Color.FromArgb(0x30, 0x30, 0x30));
-        _divPen    = new Pen(Color.FromArgb(0x3C, 0x3C, 0x3C), 1f);
+        _divPen      = new Pen(Color.FromArgb(0x3C, 0x3C, 0x3C), 1f);
         RefreshColors();
     }
 
@@ -600,15 +646,42 @@ public class OverlayForm : Form {
         if (d) {
             if (_timer  != null) { _timer.Stop();  _timer.Dispose(); }
             if (_zTimer != null) { _zTimer.Stop(); _zTimer.Dispose(); }
-            if (_m    != null) _m.Dispose();
-            if (_fLbl != null) _fLbl.Dispose();
-            if (_fVal != null) _fVal.Dispose();
-            if (_bgBrush     != null) _bgBrush.Dispose();
+            if (_notify != null) { _notify.Visible = false; _notify.Dispose(); }
+            if (_m           != null) _m.Dispose();
+            if (_fLbl        != null) _fLbl.Dispose();
+            if (_fVal        != null) _fVal.Dispose();
             if (_dimBrush    != null) _dimBrush.Dispose();
             if (_coreBgBrush != null) _coreBgBrush.Dispose();
             if (_divPen      != null) _divPen.Dispose();
         }
         base.Dispose(d);
+    }
+
+    void BuildNotifyIcon() {
+        // Draw a tiny 16x16 sparkline icon: four coloured bars (NET/CPU/GPU/MEM)
+        Icon ico;
+        using (var bmp = new Bitmap(16, 16))
+        using (var g = Graphics.FromImage(bmp)) {
+            g.Clear(Color.Transparent);
+            var bars = new[] {
+                new { C = Color.FromArgb(0x00, 0xFF, 0x88), X = 1,  H = 5  },
+                new { C = Color.FromArgb(0xFF, 0xB3, 0x00), X = 5,  H = 9  },
+                new { C = Color.FromArgb(0xFF, 0x6B, 0x35), X = 9,  H = 6  },
+                new { C = Color.FromArgb(0xCC, 0x44, 0xFF), X = 13, H = 11 },
+            };
+            foreach (var b in bars)
+                g.FillRectangle(new SolidBrush(b.C), b.X, 15 - b.H, 2, b.H);
+            ico = Icon.FromHandle(bmp.GetHicon());
+        }
+        _notify = new NotifyIcon {
+            Icon             = ico,
+            Text             = "taskmon",
+            ContextMenuStrip = _menu,
+            Visible          = true
+        };
+        _notify.DoubleClick += (o, e) => {
+            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
+        };
     }
 
     void BuildMenu() {
@@ -628,14 +701,72 @@ public class OverlayForm : Form {
         });
     }
 
-    // -- Paint -----------------------------------------------------------------
-    // Single GDI+ draw call per tick.  All resources pre-allocated.
-    void DoPaint(object _, PaintEventArgs e) {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.None; // pixel-crisp at small sizes
-        g.FillRectangle(_bgBrush, _panel.ClientRectangle);
+    // -- Layered window rendering ---------------------------------------------
+    // Renders the overlay using UpdateLayeredWindow with per-pixel alpha.
+    // Background pixels use alpha=1: visually transparent (0.4% opacity) but
+    // alpha > 0 so they still receive mouse events -- no click-through.
+    internal void UpdateLayer() {
+        if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+        int w = Width, h = Height;
 
-        int x = 0, h = _panel.Height;
+        IntPtr screenDC = IntPtr.Zero, memDC = IntPtr.Zero;
+        IntPtr hDib = IntPtr.Zero, oldObj = IntPtr.Zero;
+        try {
+            screenDC = Native.GetDC(IntPtr.Zero);
+            memDC    = Native.CreateCompatibleDC(screenDC);
+
+            // Create a 32bpp top-down DIB for GDI+ to draw into.
+            IntPtr bits;
+            var bmi = new Native.BITMAPINFO {
+                bmiHeader = new Native.BITMAPINFOHEADER {
+                    biSize     = Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER)),
+                    biWidth    = w,
+                    biHeight   = -h, // negative = top-down scanlines
+                    biPlanes   = 1,
+                    biBitCount = 32
+                }
+            };
+            hDib   = Native.CreateDIBSection(screenDC, ref bmi, 0, out bits, IntPtr.Zero, 0);
+            oldObj = Native.SelectObject(memDC, hDib);
+
+            // GDI+ renders into the DIB.  Format32bppPArgb stores premultiplied alpha,
+            // which is what UpdateLayeredWindow (AC_SRC_ALPHA) requires.
+            using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, bits))
+            using (var g = Graphics.FromImage(bmp)) {
+                // Alpha=1 background: visually ~transparent but receives mouse input.
+                g.Clear(Color.FromArgb(1, 0, 0, 0));
+
+                g.SmoothingMode     = SmoothingMode.None;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                DrawContent(g, w, h);
+            }
+
+            // Compose onto screen with per-pixel alpha (SourceConstantAlpha scaled by Opacity).
+            byte globalAlpha = (byte)Math.Max(1, Math.Min(255,
+                (int)(Clamp01(S.Opacity) * 255)));
+            var blend = new Native.BLENDFUNCTION {
+                BlendOp             = 0,   // AC_SRC_OVER
+                BlendFlags          = 0,
+                SourceConstantAlpha = globalAlpha,
+                AlphaFormat         = 1    // AC_SRC_ALPHA -- use per-pixel alpha
+            };
+            var dst = new Native.PTWIN { x = Left, y = Top };
+            var src = new Native.PTWIN { x = 0,    y = 0   };
+            var sz  = new Native.SZWIN { cx = w,   cy = h  };
+            Native.UpdateLayeredWindow(Handle, screenDC,
+                ref dst, ref sz, memDC, ref src, 0, ref blend, Native.ULW_ALPHA);
+        } finally {
+            if (oldObj   != IntPtr.Zero) Native.SelectObject(memDC, oldObj);
+            if (hDib     != IntPtr.Zero) Native.DeleteObject(hDib);
+            if (memDC    != IntPtr.Zero) Native.DeleteDC(memDC);
+            if (screenDC != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screenDC);
+        }
+    }
+
+    void DrawContent(Graphics g, int w, int h) {
+        // No background fill -- background pixels stay at alpha=1 (set in UpdateLayer),
+        // making them visually transparent while still receiving mouse events.
+        int x = 0;
 
         if (S.ShowNetUp)
             DrawSection(g, ref x, h, "UPLOAD",
@@ -1003,10 +1134,8 @@ public class SettingsForm : Form {
 
         // Live-update the overlay without a restart
         _host.RefreshColors();
-        _host.Opacity = _d.Opacity;
         _host._timer.Interval = Math.Max(250, _d.UpdateIntervalMs);
-        _host.DoLayout();
-        _host.Invalidate(true);
+        _host.DoLayout(); // repositions and calls UpdateLayer()
     }
 
     static void CopyTo(Settings s, Settings d) {
