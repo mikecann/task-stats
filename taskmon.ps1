@@ -40,4 +40,5 @@ if (-not (Test-Path $dll)) {
 }
 
 [System.Reflection.Assembly]::LoadFrom($dll) | Out-Null
-[TaskMon.App]::Run()
+# Pass the script directory so the C# side can locate taskmon.vbs for the startup registry entry.
+[TaskMon.App]::Run($PSScriptRoot)

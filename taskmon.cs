@@ -45,6 +45,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace TaskMon {
 
@@ -181,6 +182,8 @@ public class Settings {
     public int    UpdateIntervalMs = 1000;
     // 1.0 = fully opaque; 0.5 = 50% transparent (lets you see icons beneath).
     public double Opacity          = 1.0;
+    // Launch taskmon automatically when Windows starts.
+    public bool   RunOnStartup     = true;
 
     // -- Sparkline colours (HTML hex) -----------------------------------------
     public string ColorNetUp    = "#FF4040"; // upload   -- red
@@ -236,6 +239,8 @@ public class Settings {
             "milliseconds between samples: 500 (snappy) | 1000 (recommended) | 2000 (quiet)");
         Jd(b, "Opacity",          Opacity,
             "1.00 = fully opaque  |  0.50 = half transparent  (min 0.30)");
+        Jb(b, "RunOnStartup",     RunOnStartup,
+            "true = launch automatically when Windows starts");
         b.AppendLine();
         b.AppendLine("  \"_colours\": \"HTML hex colour for each sparkline -- e.g. #FF0000 for red\",");
         Js(b, "ColorNetUp",     ColorNetUp);
@@ -299,6 +304,7 @@ public class Settings {
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture,
                         out s.Opacity); break;
+                case "RunOnStartup": s.RunOnStartup = bv == "true"; break;
                 case "ColorNetUp":    s.ColorNetUp    = sv; break;
                 case "ColorNetDown":  s.ColorNetDown  = sv; break;
                 case "ColorCpu":      s.ColorCpu      = sv; break;
@@ -495,6 +501,7 @@ class DBPanel : Panel {
 public class OverlayForm : Form {
     public  Settings S;
     Metrics  _m;
+    internal string _scriptDir; // set by App.Run() -- needed to update startup reg entry
     internal System.Windows.Forms.Timer _timer;
     System.Windows.Forms.Timer _zTimer;
     ContextMenuStrip _menu;
@@ -513,9 +520,10 @@ public class OverlayForm : Form {
     const int CBAR_W = 9;   // per-core bar width (px)
     const int CBAR_G = 2;   // per-core bar gap (px)
 
-    public OverlayForm(Settings s) {
-        S  = s;
-        _m = new Metrics(s.NetworkAdapter);
+    public OverlayForm(Settings s, string scriptDir = null) {
+        S          = s;
+        _scriptDir = scriptDir;
+        _m         = new Metrics(s.NetworkAdapter);
         AllocGdi();
 
         FormBorderStyle = FormBorderStyle.None;
@@ -966,6 +974,7 @@ public class SettingsForm : Form {
     RadioButton _rb500, _rb1k, _rb2k;
     TrackBar    _tbOp;
     Label       _lblOp;
+    CheckBox    _cbStartup;
 
     // Light-mode palette -- avoids fighting WinForms dark-theme rendering in
     // title bars, tab strips, and ComboBox dropdowns.
@@ -1165,6 +1174,16 @@ public class SettingsForm : Form {
         p.Controls.Add(_tbOp); p.Controls.Add(_lblOp);
         y += 28;
 
+        y += 6;
+        SecHead(p, "\u25B6", "Startup", ref y);
+        _cbStartup = new CheckBox {
+            Text     = "Launch taskmon automatically when Windows starts",
+            Location = new Point(18, y), Size = new Size(400, 20),
+            Checked  = _d.RunOnStartup
+        };
+        p.Controls.Add(_cbStartup);
+        y += 26;
+
         p.Controls.Add(new Label {
             Text      = "Note: changing the network adapter takes effect on next restart.",
             Location  = new Point(18, y), Size = new Size(400, 18),
@@ -1200,9 +1219,13 @@ public class SettingsForm : Form {
         _d.ColorMemory      = ColorTranslator.ToHtml(_bMem.BackColor);
         _d.UpdateIntervalMs = _rb500.Checked ? 500 : _rb2k.Checked ? 2000 : 1000;
         _d.Opacity          = _tbOp.Value / 100.0;
+        _d.RunOnStartup     = _cbStartup.Checked;
 
         CopyTo(_d, _host.S);
         _d.Save();
+        // Apply startup registry entry immediately
+        if (_host._scriptDir != null)
+            App.ApplyStartup(_d.RunOnStartup, _host._scriptDir);
 
         // Live-update the overlay without a restart
         _host.RefreshColors();
@@ -1216,6 +1239,7 @@ public class SettingsForm : Form {
         d.ShowGpuUtil = s.ShowGpuUtil; d.ShowGpuTemp = s.ShowGpuTemp;
         d.ShowMemory = s.ShowMemory; d.NetworkAdapter = s.NetworkAdapter;
         d.UpdateIntervalMs = s.UpdateIntervalMs; d.Opacity = s.Opacity;
+        d.RunOnStartup = s.RunOnStartup;
         d.ColorNetUp = s.ColorNetUp; d.ColorNetDown = s.ColorNetDown;
         d.ColorCpu = s.ColorCpu; d.ColorGpu = s.ColorGpu; d.ColorGpuTemp = s.ColorGpuTemp;
         d.ColorMemory = s.ColorMemory;
@@ -1248,14 +1272,38 @@ class DarkRenderer : ToolStripProfessionalRenderer {
 // App -- entry point called by taskmon.ps1
 // =============================================================================
 public static class App {
-    public static void Run() {
+    const string REG_KEY  = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string REG_NAME = "taskmon";
+
+    // scriptDir is passed from taskmon.ps1 ($PSScriptRoot) so we can find taskmon.vbs.
+    public static void Run(string scriptDir = null) {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         var s = Settings.Load();
-        using (var f = new OverlayForm(s)) {
+        // Apply startup registration on every launch so it stays in sync with the setting.
+        if (scriptDir != null)
+            ApplyStartup(s.RunOnStartup, scriptDir);
+        using (var f = new OverlayForm(s, scriptDir)) {
             f.Show();
             Application.Run(f);
         }
+    }
+
+    // Adds or removes the HKCU Run entry.
+    // cmd = wscript.exe "<path to taskmon.vbs>"
+    internal static void ApplyStartup(bool enable, string scriptDir) {
+        try {
+            using (var key = Registry.CurrentUser.OpenSubKey(REG_KEY, writable: true)) {
+                if (key == null) return;
+                if (enable) {
+                    var vbs = Path.Combine(scriptDir, "taskmon.vbs");
+                    key.SetValue(REG_NAME,
+                        string.Format("wscript.exe \"{0}\"", vbs));
+                } else {
+                    key.DeleteValue(REG_NAME, throwOnMissingValue: false);
+                }
+            }
+        } catch { }
     }
 }
 

@@ -25,6 +25,7 @@ echo Building taskmon.cs ...
     /r:System.Windows.Forms.dll ^
     /r:System.Drawing.dll ^
     /r:System.Core.dll ^
+    /r:System.dll ^
     "%~dp0taskmon.cs"
 
 if %errorlevel% neq 0 (
