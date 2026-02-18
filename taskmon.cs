@@ -661,31 +661,31 @@ public class OverlayForm : Form {
         base.Dispose(d);
     }
 
-    void BuildNotifyIcon() {
-        // Draw a tiny 16x16 sparkline icon: four coloured bars (NET/CPU/GPU/MEM)
-        Icon ico;
+    // Creates the 16×16 sparkline bar icon used for both the tray and the settings title bar.
+    internal static Icon MakeAppIcon() {
         using (var bmp = new Bitmap(16, 16))
         using (var g = Graphics.FromImage(bmp)) {
             g.Clear(Color.Transparent);
             var bars = new[] {
-                new { C = Color.FromArgb(0x00, 0xFF, 0x88), X = 1,  H = 5  },
+                new { C = Color.FromArgb(0xFF, 0x40, 0x40), X = 1,  H = 5  },
                 new { C = Color.FromArgb(0xFF, 0xB3, 0x00), X = 5,  H = 9  },
                 new { C = Color.FromArgb(0xFF, 0x6B, 0x35), X = 9,  H = 6  },
                 new { C = Color.FromArgb(0xCC, 0x44, 0xFF), X = 13, H = 11 },
             };
             foreach (var b in bars)
                 g.FillRectangle(new SolidBrush(b.C), b.X, 15 - b.H, 2, b.H);
-            ico = Icon.FromHandle(bmp.GetHicon());
+            return Icon.FromHandle(bmp.GetHicon());
         }
+    }
+
+    void BuildNotifyIcon() {
         _notify = new NotifyIcon {
-            Icon             = ico,
+            Icon             = MakeAppIcon(),
             Text             = "taskmon",
             ContextMenuStrip = _menu,
             Visible          = true
         };
-        _notify.DoubleClick += (o, e) => {
-            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
-        };
+        _notify.DoubleClick += (o, e) => OpenSettings();
     }
 
     void BuildMenu() {
@@ -695,14 +695,23 @@ public class OverlayForm : Form {
             Renderer  = new DarkRenderer()
         };
         var miSet  = new ToolStripMenuItem("Settings...");
-        miSet.Click += (o, e) => {
-            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
-        };
+        miSet.Click += (o, e) => OpenSettings();
         var miQuit = new ToolStripMenuItem("Quit");
         miQuit.Click += (o, e) => Application.Exit();
         _menu.Items.AddRange(new ToolStripItem[] {
             miSet, new ToolStripSeparator(), miQuit
         });
+    }
+
+    // Opens the settings dialog with the z-order timer paused so the overlay
+    // doesn't cover the ComboBox dropdown or the dialog itself.
+    void OpenSettings() {
+        _zTimer.Stop();
+        try {
+            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
+        } finally {
+            _zTimer.Start();
+        }
     }
 
     // -- Layered window rendering ---------------------------------------------
@@ -958,18 +967,26 @@ public class SettingsForm : Form {
     TrackBar    _tbOp;
     Label       _lblOp;
 
+    // Light-mode palette -- avoids fighting WinForms dark-theme rendering in
+    // title bars, tab strips, and ComboBox dropdowns.
+    static readonly Color BG      = Color.FromArgb(0xF3, 0xF3, 0xF3); // page bg
+    static readonly Color BG2     = Color.White;                        // footer / alternate
+    static readonly Color ACCENT  = Color.FromArgb(0x00, 0x5B, 0xB5); // section headers
+    static readonly Color SEP     = Color.FromArgb(0xCC, 0xCC, 0xCC);
+    static readonly Color FG      = Color.FromArgb(0x1A, 0x1A, 0x1A);
+    static readonly Color FG_DIM  = Color.FromArgb(0x66, 0x66, 0x66);
+
     public SettingsForm(Settings s, OverlayForm host) {
         _d    = s.Clone();
         _host = host;
 
         Text            = "taskmon \u2014 Settings";
-        Size            = new Size(440, 410);
+        Size            = new Size(460, 460);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox     = MinimizeBox = false;
         StartPosition   = FormStartPosition.CenterScreen;
-        BackColor       = Color.FromArgb(0x2D, 0x2D, 0x2D);
-        ForeColor       = Color.White;
         Font            = new Font("Segoe UI", 9f);
+        Icon            = OverlayForm.MakeAppIcon();
 
         var tabs = new TabControl { Dock = DockStyle.Fill };
         tabs.TabPages.Add(TabDisplay());
@@ -977,73 +994,92 @@ public class SettingsForm : Form {
         tabs.TabPages.Add(TabBehaviour());
 
         var foot = new Panel {
-            Dock      = DockStyle.Bottom, Height = 46,
-            BackColor = Color.FromArgb(0x25, 0x25, 0x25)
+            Dock = DockStyle.Bottom, Height = 50,
+            BackColor = Color.FromArgb(0xE8, 0xE8, 0xE8)
         };
-        var bOk  = MakeBtn("Apply && Close", 226, foot);
-        var bCan = MakeBtn("Cancel",         328, foot);
+        foot.Paint += (o, e) =>
+            e.Graphics.DrawLine(new Pen(SEP), 0, 0, foot.Width, 0);
+        // Primary action: Windows accent blue
+        var bOk = new Button {
+            Text = "Apply \u0026 Close", Location = new Point(222, 10), Size = new Size(116, 30),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0x00, 0x78, 0xD4), ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+        };
+        bOk.FlatAppearance.BorderColor = Color.FromArgb(0x00, 0x5A, 0xA8);
+        var bCan = new Button {
+            Text = "Cancel", Location = new Point(348, 10), Size = new Size(90, 30),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0xE0, 0xE0, 0xE0), ForeColor = FG
+        };
+        bCan.FlatAppearance.BorderColor = SEP;
         bOk.Click  += (o, e) => { Apply(); Close(); };
         bCan.Click += (o, e) => Close();
+        foot.Controls.Add(bOk); foot.Controls.Add(bCan);
 
         Controls.Add(tabs);
         Controls.Add(foot);
     }
 
-    static Button MakeBtn(string t, int x, Control p) {
-        var b = new Button {
-            Text      = t, Location = new Point(x, 9), Size = new Size(100, 28),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(0x40, 0x40, 0x40), ForeColor = Color.White
-        };
-        b.FlatAppearance.BorderColor = Color.FromArgb(0x60, 0x60, 0x60);
-        p.Controls.Add(b); return b;
-    }
-
     // -- Tab helpers -----------------------------------------------------------
     TabPage TP(string t) {
-        return new TabPage(t) {
-            BackColor = Color.FromArgb(0x2D, 0x2D, 0x2D), ForeColor = Color.White };
+        return new TabPage(t) { BackColor = BG };
     }
-    Label SL(string t, int x, int y) {
-        return new Label {
-            Text = t, Location = new Point(x, y), Size = new Size(390, 16),
-            ForeColor = Color.FromArgb(0xAA, 0xCC, 0xFF),
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold) };
+
+    // Section header: blue-tinted bold label + thin separator line.
+    void SecHead(Control p, string icon, string text, ref int y) {
+        p.Controls.Add(new Label {
+            Text = icon + "  " + text,
+            Location = new Point(8, y), Size = new Size(420, 18),
+            ForeColor = ACCENT,
+            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
+        });
+        p.Controls.Add(new Panel {
+            Location = new Point(8, y + 19), Size = new Size(420, 1), BackColor = SEP
+        });
+        y += 26;
     }
-    CheckBox CB(string t, int x, int y, bool v) {
-        return new CheckBox {
-            Text = t, Location = new Point(x, y), Size = new Size(390, 19),
-            Checked = v, ForeColor = Color.White };
+
+    // Checkbox row with a 10×10 colored indicator dot on the left.
+    void MetricRow(TabPage p, ref CheckBox cb, string text, Color dot, bool chk, ref int y) {
+        p.Controls.Add(new Panel { Location = new Point(10, y + 5), Size = new Size(10, 10), BackColor = dot });
+        cb = new CheckBox {
+            Text = text, Location = new Point(26, y), Size = new Size(400, 20),
+            Checked = chk
+        };
+        p.Controls.Add(cb);
+        y += 22;
     }
+
     RadioButton RB(string t, int x, int y, bool v) {
         return new RadioButton {
-            Text = t, Location = new Point(x, y), Size = new Size(390, 19),
-            Checked = v, ForeColor = Color.White };
+            Text = t, Location = new Point(x, y), Size = new Size(400, 19), Checked = v
+        };
     }
 
     // -- Display tab ----------------------------------------------------------
     TabPage TabDisplay() {
         var p = TP("Display"); int y = 10;
-        p.Controls.Add(SL("Metrics to show", 8, y)); y += 20;
-        _cbUp  = CB("Upload speed  (NET \u2191)",                 18, y, _d.ShowNetUp);   y += 21;
-        _cbDn  = CB("Download speed  (NET \u2193)",               18, y, _d.ShowNetDown); y += 21;
-        _cbCpu = CB("CPU utilisation",                            18, y, _d.ShowCpu);     y += 21;
-        _cbGU  = CB("GPU utilisation %  (NVIDIA RTX 5070 Ti)",   18, y, _d.ShowGpuUtil); y += 21;
-        _cbGT  = CB("GPU temperature \u00B0C  (NVIDIA RTX 5070 Ti)", 18, y, _d.ShowGpuTemp); y += 21;
-        _cbMem = CB("Memory usage %",                            18, y, _d.ShowMemory);  y += 26;
-        foreach (var c in new Control[]{ _cbUp,_cbDn,_cbCpu,_cbGU,_cbGT,_cbMem })
-            p.Controls.Add(c);
 
-        p.Controls.Add(SL("CPU display mode", 8, y)); y += 20;
-        _rbAgg = RB("Aggregate \u2014 single sparkline for overall CPU%",       18, y, _d.CpuMode != "PerCore"); y += 21;
-        _rbPC  = RB("Per-core bars \u2014 XMeters-style grid  (24 bars, 3 \u00D7 8)", 18, y, _d.CpuMode == "PerCore"); y += 26;
+        SecHead(p, "\u25A0", "Metrics to show", ref y);
+        MetricRow(p, ref _cbUp,  "Upload speed  (NET \u2191)",                    SafeColor(_d.ColorNetUp),   _d.ShowNetUp,   ref y);
+        MetricRow(p, ref _cbDn,  "Download speed  (NET \u2193)",                  SafeColor(_d.ColorNetDown), _d.ShowNetDown, ref y);
+        MetricRow(p, ref _cbCpu, "CPU utilisation",                               SafeColor(_d.ColorCpu),     _d.ShowCpu,     ref y);
+        MetricRow(p, ref _cbGU,  "GPU utilisation %  (NVIDIA RTX 5070 Ti)",      SafeColor(_d.ColorGpu),     _d.ShowGpuUtil, ref y);
+        MetricRow(p, ref _cbGT,  "GPU temperature \u00B0C  (NVIDIA RTX 5070 Ti)", SafeColor(_d.ColorGpuTemp), _d.ShowGpuTemp, ref y);
+        MetricRow(p, ref _cbMem, "Memory usage %",                               SafeColor(_d.ColorMemory),  _d.ShowMemory,  ref y);
+        y += 6;
+
+        SecHead(p, "\u25A3", "CPU display mode", ref y);
+        _rbAgg = RB("Aggregate \u2014 single sparkline for overall CPU%",             18, y, _d.CpuMode != "PerCore"); y += 21;
+        _rbPC  = RB("Per-core bars \u2014 XMeters-style grid  (24 bars, 3\u00D78)",  18, y, _d.CpuMode == "PerCore"); y += 10;
         p.Controls.Add(_rbAgg); p.Controls.Add(_rbPC);
+        y += 16;
 
-        p.Controls.Add(SL("Network adapter", 8, y)); y += 20;
+        SecHead(p, "\u25BA", "Network adapter", ref y);
         _cboNet = new ComboBox {
-            Location = new Point(18, y), Size = new Size(390, 22),
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            BackColor = Color.FromArgb(0x3D, 0x3D, 0x3D), ForeColor = Color.White
+            Location = new Point(18, y), Size = new Size(410, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList
         };
         try {
             _cboNet.Items.Add("auto");
@@ -1061,82 +1097,78 @@ public class SettingsForm : Form {
 
     // -- Colours tab ----------------------------------------------------------
     TabPage TabColours() {
-        var p = TP("Colours"); int y = 12;
-        p.Controls.Add(SL("Sparkline colours  (click swatch to change)", 8, y)); y += 22;
-        ColRow(p, "NET \u2191  upload",    _d.ColorNetUp,   ref _bUp,  ref y);
-        ColRow(p, "NET \u2193  download",  _d.ColorNetDown, ref _bDn,  ref y);
-        ColRow(p, "CPU",                   _d.ColorCpu,     ref _bCpu, ref y);
-        ColRow(p, "GPU utilisation",       _d.ColorGpu,     ref _bGpu,     ref y);
-        ColRow(p, "GPU temperature",       _d.ColorGpuTemp, ref _bGpuTemp, ref y);
-        ColRow(p, "Memory",                _d.ColorMemory,  ref _bMem,     ref y);
+        var p = TP("Colours"); int y = 10;
+        int dummy = y; SecHead(p, "\u25CF", "Sparkline colours  \u2014  click swatch to change", ref dummy); y = dummy;
+        ColRow(p, "Upload  (NET \u2191)",    _d.ColorNetUp,   ref _bUp,      ref y);
+        ColRow(p, "Download  (NET \u2193)",  _d.ColorNetDown, ref _bDn,      ref y);
+        ColRow(p, "CPU",                     _d.ColorCpu,     ref _bCpu,     ref y);
+        ColRow(p, "GPU utilisation",         _d.ColorGpu,     ref _bGpu,     ref y);
+        ColRow(p, "GPU temperature",         _d.ColorGpuTemp, ref _bGpuTemp, ref y);
+        ColRow(p, "Memory",                  _d.ColorMemory,  ref _bMem,     ref y);
         p.Controls.Add(new Label {
-            Text     = "Changes apply immediately when you click Apply & Close.",
-            Location = new Point(12, y + 6), Size = new Size(390, 18),
-            ForeColor = Color.FromArgb(0x70, 0x70, 0x70),
-            Font     = new Font("Segoe UI", 8f)
+            Text      = "Changes take effect on Apply \u0026 Close.",
+            Location  = new Point(14, y + 4), Size = new Size(390, 18),
+            ForeColor = FG_DIM, Font = new Font("Segoe UI", 8f)
         });
         return p;
     }
 
     void ColRow(TabPage p, string lbl, string hex, ref Button btn, ref int y) {
-        p.Controls.Add(new Label {
-            Text = lbl, Location = new Point(12, y + 4),
-            Size = new Size(140, 20), ForeColor = Color.White
-        });
+        var dot = new Panel { Location = new Point(12, y + 9), Size = new Size(10, 10), BackColor = SafeColor(hex) };
+        p.Controls.Add(dot);
+        p.Controls.Add(new Label { Text = lbl, Location = new Point(28, y + 6), Size = new Size(130, 20) });
         var b = new Button {
-            Location  = new Point(158, y), Size = new Size(44, 24),
-            FlatStyle = FlatStyle.Flat, Text = "",
-            BackColor = SafeColor(hex)
+            Location = new Point(164, y + 2), Size = new Size(56, 26),
+            FlatStyle = FlatStyle.Flat, Text = "", BackColor = SafeColor(hex)
         };
-        b.FlatAppearance.BorderColor = Color.FromArgb(0x66, 0x66, 0x66);
+        b.FlatAppearance.BorderColor = Color.FromArgb(0xAA, 0xAA, 0xAA);
         b.Click += (o, e) => {
             using (var dlg = new ColorDialog { Color = b.BackColor, FullOpen = true })
                 if (dlg.ShowDialog() == DialogResult.OK) b.BackColor = dlg.Color;
         };
         var hexLbl = new Label {
-            Location  = new Point(210, y + 4), Size = new Size(100, 18),
-            ForeColor = Color.Gray, Font = new Font("Consolas", 8f)
+            Location  = new Point(228, y + 8), Size = new Size(90, 16),
+            ForeColor = FG_DIM, Font = new Font("Consolas", 8.5f)
         };
-        // Keep hex label in sync with the swatch
-        b.BackColorChanged += (o, e) =>
-            hexLbl.Text = ColorTranslator.ToHtml(b.BackColor).ToUpper();
+        b.BackColorChanged += (o, e) => {
+            dot.BackColor = b.BackColor;
+            hexLbl.Text   = ColorTranslator.ToHtml(b.BackColor).ToUpper();
+        };
         hexLbl.Text = hex.ToUpper();
         p.Controls.Add(b); p.Controls.Add(hexLbl);
-        btn = b; y += 30;
+        btn = b; y += 32;
     }
 
     // -- Behaviour tab --------------------------------------------------------
     TabPage TabBehaviour() {
         var p = TP("Behaviour"); int y = 10;
-        p.Controls.Add(SL("Update interval", 8, y)); y += 20;
-        _rb500 = RB("500 ms \u2014 snappier, slightly more CPU",  18, y, _d.UpdateIntervalMs == 500);  y += 21;
-        _rb1k  = RB("1 second \u2014 recommended",                18, y, _d.UpdateIntervalMs == 1000); y += 21;
-        _rb2k  = RB("2 seconds \u2014 very quiet",                18, y, _d.UpdateIntervalMs == 2000); y += 28;
+        SecHead(p, "\u23F1", "Update interval", ref y);
+        _rb500 = RB("500 ms \u2014 snappier, slightly more CPU",  18, y, _d.UpdateIntervalMs == 500);  y += 22;
+        _rb1k  = RB("1 second \u2014 recommended",                18, y, _d.UpdateIntervalMs == 1000); y += 22;
+        _rb2k  = RB("2 seconds \u2014 very quiet",                18, y, _d.UpdateIntervalMs == 2000); y += 10;
         if (!_rb500.Checked && !_rb1k.Checked && !_rb2k.Checked) _rb1k.Checked = true;
         p.Controls.Add(_rb500); p.Controls.Add(_rb1k); p.Controls.Add(_rb2k);
+        y += 16;
 
-        p.Controls.Add(SL("Window opacity", 8, y)); y += 20;
+        SecHead(p, "\u25D1", "Window opacity", ref y);
         _tbOp = new TrackBar {
-            Location = new Point(18, y), Size = new Size(380, 30),
+            Location = new Point(18, y), Size = new Size(400, 30),
             Minimum = 30, Maximum = 100, TickFrequency = 10,
-            Value = (int)(_d.Opacity * 100),
-            BackColor = Color.FromArgb(0x2D, 0x2D, 0x2D)
+            Value = (int)(_d.Opacity * 100)
         };
         y += 32;
         _lblOp = new Label {
-            Location = new Point(18, y), Size = new Size(380, 18),
-            ForeColor = Color.Silver
+            Location = new Point(18, y), Size = new Size(400, 18), ForeColor = Color.Silver
         };
         UpdateOpLbl();
         _tbOp.ValueChanged += (o, e) => UpdateOpLbl();
         p.Controls.Add(_tbOp); p.Controls.Add(_lblOp);
+        y += 28;
 
-        y += 24;
         p.Controls.Add(new Label {
-            Text     = "Note: changing the network adapter takes effect on next restart.",
-            Location = new Point(18, y), Size = new Size(380, 18),
-            ForeColor = Color.FromArgb(0x70, 0x70, 0x70),
-            Font     = new Font("Segoe UI", 8f)
+            Text      = "Note: changing the network adapter takes effect on next restart.",
+            Location  = new Point(18, y), Size = new Size(400, 18),
+            ForeColor = FG_DIM, Font = new Font("Segoe UI", 8f)
         });
         return p;
     }
@@ -1146,6 +1178,7 @@ public class SettingsForm : Form {
                     : _tbOp.Value <= 50  ? " (very transparent)" : "";
         _lblOp.Text = string.Format("Opacity: {0}%{1}", _tbOp.Value, note);
     }
+
 
     // -- Apply -----------------------------------------------------------------
     // Reads all controls into _draft, copies to live settings, saves JSON,
