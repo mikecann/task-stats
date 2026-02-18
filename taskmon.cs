@@ -183,10 +183,11 @@ public class Settings {
     public double Opacity          = 1.0;
 
     // -- Sparkline colours (HTML hex) -----------------------------------------
-    public string ColorNetUp    = "#00FF88";
-    public string ColorNetDown  = "#00AAFF";
+    public string ColorNetUp    = "#FF4040"; // upload   -- red
+    public string ColorNetDown  = "#00FF88"; // download -- green
     public string ColorCpu      = "#FFB300";
-    public string ColorGpu      = "#FF6B35";
+    public string ColorGpu      = "#FF6B35"; // GPU utilisation
+    public string ColorGpuTemp  = "#FFDD44"; // GPU temperature (distinct from util)
     public string ColorMemory   = "#CC44FF";
 
     // -- Persistence ----------------------------------------------------------
@@ -241,6 +242,7 @@ public class Settings {
         Js(b, "ColorNetDown",   ColorNetDown);
         Js(b, "ColorCpu",       ColorCpu);
         Js(b, "ColorGpu",       ColorGpu);
+        Js(b, "ColorGpuTemp",   ColorGpuTemp);
         Js(b, "ColorMemory",    ColorMemory, null, last: true);
         b.AppendLine("}");
         return b.ToString();
@@ -301,6 +303,7 @@ public class Settings {
                 case "ColorNetDown":  s.ColorNetDown  = sv; break;
                 case "ColorCpu":      s.ColorCpu      = sv; break;
                 case "ColorGpu":      s.ColorGpu      = sv; break;
+                case "ColorGpuTemp":  s.ColorGpuTemp  = sv; break;
                 case "ColorMemory":   s.ColorMemory   = sv; break;
             }
         }
@@ -502,7 +505,7 @@ public class OverlayForm : Form {
     Font       _fLbl, _fVal;
     SolidBrush _dimBrush, _coreBgBrush;
     Pen        _divPen;
-    Color      _cUp, _cDn, _cCpu, _cGpu, _cMem;
+    Color      _cUp, _cDn, _cCpu, _cGpu, _cGpuTemp, _cMem;
     float[]    _buf = new float[60]; // scratch buffer for CopyTo inside UpdateLayer
 
     // -- Layout constants ------------------------------------------------------
@@ -638,8 +641,9 @@ public class OverlayForm : Form {
         _cUp  = ParseHex(S.ColorNetUp,   "#00FF88");
         _cDn  = ParseHex(S.ColorNetDown, "#00AAFF");
         _cCpu = ParseHex(S.ColorCpu,     "#FFB300");
-        _cGpu = ParseHex(S.ColorGpu,     "#FF6B35");
-        _cMem = ParseHex(S.ColorMemory,  "#CC44FF");
+        _cGpu     = ParseHex(S.ColorGpu,     "#FF6B35");
+        _cGpuTemp = ParseHex(S.ColorGpuTemp, "#FFDD44");
+        _cMem     = ParseHex(S.ColorMemory,  "#CC44FF");
     }
 
     protected override void Dispose(bool d) {
@@ -769,10 +773,10 @@ public class OverlayForm : Form {
         int x = 0;
 
         if (S.ShowNetUp)
-            DrawSection(g, ref x, h, "UPLOAD",
+            DrawSection(g, ref x, h, "UPLOAD \u2191",
                 SpeedStr(_m.NetUpBps), _cUp, _m.HNetUp, _m.NetPeak);
         if (S.ShowNetDown)
-            DrawSection(g, ref x, h, "DOWNLOAD",
+            DrawSection(g, ref x, h, "DOWNLOAD \u2193",
                 SpeedStr(_m.NetDnBps), _cDn, _m.HNetDn, _m.NetPeak);
         if (S.ShowCpu) {
             if (S.CpuMode == "PerCore")
@@ -781,17 +785,50 @@ public class OverlayForm : Form {
                 DrawSection(g, ref x, h, "CPU",
                     string.Format("{0:F0}%", _m.CpuTotal), _cCpu, _m.HCpu, 100f);
         }
-        if (S.ShowGpuUtil || S.ShowGpuTemp) {
-            string gv = (S.ShowGpuUtil && S.ShowGpuTemp)
-                ? string.Format("{0:F0}% {1}\u00B0C", _m.GpuUtil, _m.GpuTempC)
-                : S.ShowGpuUtil
-                    ? string.Format("{0:F0}%", _m.GpuUtil)
-                    : string.Format("{0}\u00B0C", _m.GpuTempC);
-            DrawSection(g, ref x, h, "GPU", gv, _cGpu, _m.HGpu, 100f);
-        }
+        if (S.ShowGpuUtil || S.ShowGpuTemp)
+            DrawGpuSection(g, ref x, h);
         if (S.ShowMemory)
             DrawSection(g, ref x, h, "MEM",
                 string.Format("{0:F0}%", _m.MemPct), _cMem, _m.HMem, 100f);
+    }
+
+    // GPU section: sparkline driven by utilisation; value line shows util% in one
+    // colour and temp°C in a distinct colour so they're easy to tell apart at a glance.
+    void DrawGpuSection(Graphics g, ref int x, int h) {
+        if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
+        DrawSparkline(g, _m.HGpu, new Rectangle(x, 0, SW, h), _cGpu, 100f);
+        g.DrawString("GPU", _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
+
+        // Value line: util and/or temp in separate colours.
+        if (S.ShowGpuUtil && S.ShowGpuTemp) {
+            // Draw util% left-aligned in GPU colour, temp°C right-aligned in temp colour.
+            string util = string.Format("{0:F0}%", _m.GpuUtil);
+            string temp = string.Format("{0}\u00B0C", _m.GpuTempC);
+            var rf = new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f);
+            var sfL = new StringFormat { Alignment = StringAlignment.Near,
+                                         LineAlignment = StringAlignment.Center };
+            var sfR = new StringFormat { Alignment = StringAlignment.Far,
+                                         LineAlignment = StringAlignment.Center };
+            using (var bu = new SolidBrush(_cGpu))
+            using (var bt = new SolidBrush(_cGpuTemp)) {
+                g.DrawString(util, _fVal, bu, rf, sfL);
+                g.DrawString(temp, _fVal, bt, rf, sfR);
+            }
+        } else if (S.ShowGpuUtil) {
+            using (var b = new SolidBrush(_cGpu))
+                g.DrawString(string.Format("{0:F0}%", _m.GpuUtil), _fVal, b,
+                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
+                    new StringFormat { Alignment = StringAlignment.Center,
+                                       LineAlignment = StringAlignment.Center });
+        } else {
+            using (var b = new SolidBrush(_cGpuTemp))
+                g.DrawString(string.Format("{0}\u00B0C", _m.GpuTempC), _fVal, b,
+                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
+                    new StringFormat { Alignment = StringAlignment.Center,
+                                       LineAlignment = StringAlignment.Center });
+        }
+        x += SW;
     }
 
     // Draw one metric section: sparkline fills the background, text is overlaid.
@@ -915,7 +952,7 @@ public class SettingsForm : Form {
     RadioButton _rbAgg, _rbPC;
     ComboBox    _cboNet;
     // Colours tab controls (swatch buttons)
-    Button _bUp, _bDn, _bCpu, _bGpu, _bMem;
+    Button _bUp, _bDn, _bCpu, _bGpu, _bGpuTemp, _bMem;
     // Behaviour tab controls
     RadioButton _rb500, _rb1k, _rb2k;
     TrackBar    _tbOp;
@@ -1029,8 +1066,9 @@ public class SettingsForm : Form {
         ColRow(p, "NET \u2191  upload",    _d.ColorNetUp,   ref _bUp,  ref y);
         ColRow(p, "NET \u2193  download",  _d.ColorNetDown, ref _bDn,  ref y);
         ColRow(p, "CPU",                   _d.ColorCpu,     ref _bCpu, ref y);
-        ColRow(p, "GPU",                   _d.ColorGpu,     ref _bGpu, ref y);
-        ColRow(p, "Memory",                _d.ColorMemory,  ref _bMem, ref y);
+        ColRow(p, "GPU utilisation",       _d.ColorGpu,     ref _bGpu,     ref y);
+        ColRow(p, "GPU temperature",       _d.ColorGpuTemp, ref _bGpuTemp, ref y);
+        ColRow(p, "Memory",                _d.ColorMemory,  ref _bMem,     ref y);
         p.Controls.Add(new Label {
             Text     = "Changes apply immediately when you click Apply & Close.",
             Location = new Point(12, y + 6), Size = new Size(390, 18),
@@ -1125,6 +1163,7 @@ public class SettingsForm : Form {
         _d.ColorNetDown     = ColorTranslator.ToHtml(_bDn.BackColor);
         _d.ColorCpu         = ColorTranslator.ToHtml(_bCpu.BackColor);
         _d.ColorGpu         = ColorTranslator.ToHtml(_bGpu.BackColor);
+        _d.ColorGpuTemp     = ColorTranslator.ToHtml(_bGpuTemp.BackColor);
         _d.ColorMemory      = ColorTranslator.ToHtml(_bMem.BackColor);
         _d.UpdateIntervalMs = _rb500.Checked ? 500 : _rb2k.Checked ? 2000 : 1000;
         _d.Opacity          = _tbOp.Value / 100.0;
@@ -1145,7 +1184,7 @@ public class SettingsForm : Form {
         d.ShowMemory = s.ShowMemory; d.NetworkAdapter = s.NetworkAdapter;
         d.UpdateIntervalMs = s.UpdateIntervalMs; d.Opacity = s.Opacity;
         d.ColorNetUp = s.ColorNetUp; d.ColorNetDown = s.ColorNetDown;
-        d.ColorCpu = s.ColorCpu; d.ColorGpu = s.ColorGpu;
+        d.ColorCpu = s.ColorCpu; d.ColorGpu = s.ColorGpu; d.ColorGpuTemp = s.ColorGpuTemp;
         d.ColorMemory = s.ColorMemory;
     }
 
