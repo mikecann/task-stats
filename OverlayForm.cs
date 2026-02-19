@@ -412,36 +412,32 @@ public class OverlayForm : Form {
     void DrawGpuSection(Graphics g, ref int x, int h) {
         if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
         DrawSparkline(g, _m.HGpu, new Rectangle(x, 0, SW, h), _cGpu, 100f);
-        g.DrawString("GPU", _fLbl, _dimBrush,
-            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
+        ShadowStr(g, "GPU", _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f), null);
 
-        // Value line: util and/or temp in separate colours.
+        var rf = new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f);
         if (S.ShowGpuUtil && S.ShowGpuTemp) {
-            // Draw util% left-aligned in GPU colour, temp right-aligned in temp colour.
             string util = string.Format("{0:F0}%", _m.GpuUtil);
             string temp = string.Format("{0}\u00B0C", _m.GpuTempC);
-            var rf = new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f);
             var sfL = new StringFormat { Alignment = StringAlignment.Near,
                                          LineAlignment = StringAlignment.Center };
             var sfR = new StringFormat { Alignment = StringAlignment.Far,
                                          LineAlignment = StringAlignment.Center };
             using (var bu = new SolidBrush(_cGpu))
             using (var bt = new SolidBrush(_cGpuTemp)) {
-                g.DrawString(util, _fVal, bu, rf, sfL);
-                g.DrawString(temp, _fVal, bt, rf, sfR);
+                ShadowStr(g, util, _fVal, bu, rf, sfL);
+                ShadowStr(g, temp, _fVal, bt, rf, sfR);
             }
         } else if (S.ShowGpuUtil) {
+            var sfc = new StringFormat { Alignment = StringAlignment.Center,
+                                         LineAlignment = StringAlignment.Center };
             using (var b = new SolidBrush(_cGpu))
-                g.DrawString(string.Format("{0:F0}%", _m.GpuUtil), _fVal, b,
-                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
-                    new StringFormat { Alignment = StringAlignment.Center,
-                                       LineAlignment = StringAlignment.Center });
+                ShadowStr(g, string.Format("{0:F0}%", _m.GpuUtil), _fVal, b, rf, sfc);
         } else {
+            var sfc = new StringFormat { Alignment = StringAlignment.Center,
+                                         LineAlignment = StringAlignment.Center };
             using (var b = new SolidBrush(_cGpuTemp))
-                g.DrawString(string.Format("{0}\u00B0C", _m.GpuTempC), _fVal, b,
-                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
-                    new StringFormat { Alignment = StringAlignment.Center,
-                                       LineAlignment = StringAlignment.Center });
+                ShadowStr(g, string.Format("{0}\u00B0C", _m.GpuTempC), _fVal, b, rf, sfc);
         }
         x += SW;
     }
@@ -451,21 +447,31 @@ public class OverlayForm : Form {
                      string lbl, string val, Color col,
                      CircularBuffer hist, float scale) {
         if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
-        // Sparkline fills the full section rectangle as a subtle coloured background.
         DrawSparkline(g, hist, new Rectangle(x, 0, SW, h), col, scale);
-        // Label: small dim text at the top of the section.
-        g.DrawString(lbl, _fLbl, _dimBrush,
-            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
+        // Label: small dim text at the top, with shadow for legibility over any graph height.
+        ShadowStr(g, lbl, _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f), null);
         // Value: bold coloured text centred in the lower half.
+        var sf = new StringFormat {
+            Alignment     = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            Trimming      = StringTrimming.Character
+        };
         using (var b = new SolidBrush(col))
-            g.DrawString(val, _fVal, b,
-                new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
-                new StringFormat {
-                    Alignment     = StringAlignment.Center,
-                    LineAlignment = StringAlignment.Center,
-                    Trimming      = StringTrimming.Character
-                });
+            ShadowStr(g, val, _fVal, b,
+                new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f), sf);
         x += SW;
+    }
+
+    // Draws text with a 1px dark drop shadow so it reads clearly over any graph colour.
+    static void ShadowStr(Graphics g, string s, Font f, Brush br, RectangleF r, StringFormat sf) {
+        var sr = new RectangleF(r.X + 1, r.Y + 1, r.Width, r.Height);
+        using (var sh = new SolidBrush(Color.FromArgb(200, 0, 0, 0))) {
+            if (sf != null) g.DrawString(s, f, sh, sr, sf);
+            else            g.DrawString(s, f, sh, sr);
+        }
+        if (sf != null) g.DrawString(s, f, br, r, sf);
+        else            g.DrawString(s, f, br, r);
     }
 
     // Filled-area sparkline.  Semi-transparent fill + full-opacity edge line.
@@ -505,7 +511,7 @@ public class OverlayForm : Form {
         int gx = x + 4;
 
         // "CPU" label above the grid
-        g.DrawString("CPU", _fLbl, _dimBrush,
+        ShadowStr(g, "CPU", _fLbl, _dimBrush,
             new RectangleF(gx, 0, gridW, 9),
             new StringFormat { Alignment = StringAlignment.Center });
 
