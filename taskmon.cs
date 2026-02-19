@@ -601,19 +601,32 @@ public class OverlayForm : Form {
         DoLayout();
     }
 
-    // Returns the screen-coordinate left edge of TrayNotifyWnd (clock + tray icons)
-    // so we can sit just to its left without covering it.
+    // Returns the screen-coordinate left edge of the system tray notification area,
+    // accounting for the "show hidden icons" overflow Button which sits to the left
+    // of TrayNotifyWnd on some Windows builds and would otherwise be covered.
     static int TrayLeftEdge(Screen scr) {
         try {
             IntPtr trayWnd = Native.FindWindow("Shell_TrayWnd", null);
-            if (trayWnd != IntPtr.Zero) {
-                IntPtr notifyWnd = Native.FindWindowEx(
-                    trayWnd, IntPtr.Zero, "TrayNotifyWnd", null);
-                if (notifyWnd != IntPtr.Zero) {
-                    Native.RECT r;
-                    if (Native.GetWindowRect(notifyWnd, out r)) return r.Left;
-                }
+            if (trayWnd == IntPtr.Zero) return scr.Bounds.Right;
+
+            IntPtr notifyWnd = Native.FindWindowEx(
+                trayWnd, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (notifyWnd == IntPtr.Zero) return scr.Bounds.Right;
+
+            Native.RECT nr;
+            if (!Native.GetWindowRect(notifyWnd, out nr)) return scr.Bounds.Right;
+
+            // The overflow "show hidden icons" Button lives inside TrayNotifyWnd.
+            // Its left edge is the true leftmost point we must not cover.
+            IntPtr overflowBtn = Native.FindWindowEx(
+                notifyWnd, IntPtr.Zero, "Button", null);
+            if (overflowBtn != IntPtr.Zero) {
+                Native.RECT br;
+                if (Native.GetWindowRect(overflowBtn, out br))
+                    return Math.Min(nr.Left, br.Left);
             }
+
+            return nr.Left;
         } catch { }
         return scr.Bounds.Right;
     }
