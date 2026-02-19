@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  taskmon.csproj - MSBuild project (no .NET SDK required)
+  Compiler:  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe
+  Output:    %LOCALAPPDATA%\taskmon\taskmon.dll
+  Build:     run build.bat  (or build-and-run.bat for dev cycle)
+-->
+<Project ToolsVersion="4.0" DefaultTargets="Build"
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <AssemblyName>taskmon</AssemblyName>
+    <OutputType>Library</OutputType>
+    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
+    <RootNamespace>TaskMon</RootNamespace>
+    <Optimize>true</Optimize>
+    <!-- Output DLL directly to %LOCALAPPDATA%\taskmon\ (same path taskmon.ps1 loads from) -->
+    <OutputPath>$(LOCALAPPDATA)\taskmon\</OutputPath>
+    <!-- Keep intermediate obj files outside the repo -->
+    <BaseIntermediateOutputPath>$(LOCALAPPDATA)\taskmon\obj\</BaseIntermediateOutputPath>
+    <!-- taskmon always loads inside 64-bit PowerShell, so target x64 explicitly.
+         This fixes MSB3270 (MSIL vs AMD64 reference mismatch). -->
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- MSB3644 (.NET 4.0 targeting pack not installed) is expected and harmless:
+         MSBuild falls back to GAC DLLs, which are the same files we run against.
+         MSBuildWarningsAsMessages does not work in MSBuild 4; ignore this warning. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <!-- All .cs files in this folder are compiled together -->
+  <ItemGroup>
+    <Compile Include="*.cs" />
+  </ItemGroup>
+
+  <!-- PNG icons are embedded as manifest resources (TaskMon.icons.<name>.png) -->
+  <ItemGroup>
+    <EmbeddedResource Include="icons\*.png" />
+  </ItemGroup>
+
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+
+</Project>

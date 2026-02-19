@@ -1,0 +1,558 @@
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace TaskMon {
+
+// =============================================================================
+// Section -- identifies which overlay panel the user clicked
+// =============================================================================
+enum Section { None, NetUp, NetDown, Cpu, Gpu, Mem }
+
+// =============================================================================
+// DBPanel -- double-buffered Panel eliminates all GDI+ flicker
+// =============================================================================
+class DBPanel : Panel {
+    public DBPanel() {
+        DoubleBuffered = true;
+        SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.UserPaint            |
+            ControlStyles.OptimizedDoubleBuffer, true);
+        ResizeRedraw = true;
+    }
+}
+
+// =============================================================================
+// OverlayForm -- frameless, always-on-top window overlaid on the taskbar
+// =============================================================================
+public class OverlayForm : Form {
+    public  Settings S;
+    Metrics  _m;
+    internal string _scriptDir; // set by App.Run() -- needed to update startup reg entry
+    internal System.Windows.Forms.Timer _timer;
+    System.Windows.Forms.Timer _zTimer;
+    ContextMenuStrip _menu;
+    NotifyIcon _notify;
+    int _assertingZ;
+
+    // Pre-allocated GDI resources -- created once in AllocGdi(), never in paint loop.
+    Font       _fLbl, _fVal;
+    SolidBrush _dimBrush, _coreBgBrush;
+    Pen        _divPen;
+    Color      _cUp, _cDn, _cCpu, _cGpu, _cGpuTemp, _cMem;
+    float[]    _buf = new float[60]; // scratch buffer for CopyTo inside UpdateLayer
+
+    // -- Layout constants ------------------------------------------------------
+    const int SW     = 70;  // standard section width (px)
+    const int CBAR_W = 9;   // per-core bar width (px)
+    const int CBAR_G = 2;   // per-core bar gap (px)
+
+    public OverlayForm(Settings s, string scriptDir = null) {
+        S          = s;
+        _scriptDir = scriptDir;
+        _m         = new Metrics(s.NetworkAdapter);
+        AllocGdi();
+
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition   = FormStartPosition.Manual;
+        TopMost         = true;
+        ShowInTaskbar   = false;
+        BackColor       = Color.Black; // never painted; UpdateLayeredWindow owns the visual
+        // Suppress default WinForms painting -- our visual comes entirely from UpdateLayer().
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer, true);
+        MouseDown += (o, e) => {
+            if (e.Button == MouseButtons.Right) {
+                // SetForegroundWindow lets the menu's message filter detect outside
+                // clicks, so it auto-closes when the user clicks elsewhere.
+                Native.SetForegroundWindow(Handle);
+                _menu.Show(Cursor.Position);
+            } else if (e.Button == MouseButtons.Left) {
+                LaunchForSection(HitTest(e.X));
+            }
+        };
+
+        BuildMenu();
+        BuildNotifyIcon();
+        DoLayout();
+
+        _timer = new System.Windows.Forms.Timer { Interval = Math.Max(250, s.UpdateIntervalMs) };
+        _timer.Tick += (o, e) => Tick();
+        _timer.Start();
+
+        _zTimer = new System.Windows.Forms.Timer { Interval = 100 };
+        _zTimer.Tick += (o, e) => AssertTopmost();
+        _zTimer.Start();
+    }
+
+    // WS_EX_NOACTIVATE: clicks do not steal keyboard focus.
+    // WS_EX_TOOLWINDOW: keeps the overlay out of the Alt+Tab list.
+    protected override CreateParams CreateParams { get {
+        var p = base.CreateParams;
+        p.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW | Native.WS_EX_LAYERED;
+        return p;
+    }}
+
+    void Tick() {
+        _m.Sample();
+        UpdateLayer();
+    }
+
+    void AssertTopmost() {
+        Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+            Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+    }
+
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        const int WM_WINDOWPOSCHANGED = 0x0047;
+        if (m.Msg == WM_WINDOWPOSCHANGED && _assertingZ == 0) {
+            ++_assertingZ;
+            AssertTopmost();
+            --_assertingZ;
+        }
+    }
+
+    // Position the overlay just to the left of the system tray / clock area.
+    internal void DoLayout() {
+        var scr = Screen.PrimaryScreen;
+        int tbH = Math.Max(32, scr.Bounds.Height - scr.WorkingArea.Height);
+        int w   = CalcW();
+        int x   = TrayLeftEdge(scr) - w;
+        Size     = new Size(w, tbH);
+        Location = new Point(x, scr.Bounds.Bottom - tbH);
+        // UpdateLayeredWindow encodes position and size, so re-render after any layout change.
+        if (IsHandleCreated) UpdateLayer();
+    }
+
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        DoLayout();
+    }
+
+    // Returns the screen-coordinate left edge of the system tray notification area,
+    // accounting for the "show hidden icons" overflow Button which sits to the left
+    // of TrayNotifyWnd on some Windows builds and would otherwise be covered.
+    static int TrayLeftEdge(Screen scr) {
+        try {
+            IntPtr trayWnd = Native.FindWindow("Shell_TrayWnd", null);
+            if (trayWnd == IntPtr.Zero) return scr.Bounds.Right;
+
+            IntPtr notifyWnd = Native.FindWindowEx(
+                trayWnd, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (notifyWnd == IntPtr.Zero) return scr.Bounds.Right;
+
+            Native.RECT nr;
+            if (!Native.GetWindowRect(notifyWnd, out nr)) return scr.Bounds.Right;
+
+            // The overflow "show hidden icons" Button lives inside TrayNotifyWnd.
+            // Its left edge is the true leftmost point we must not cover.
+            IntPtr overflowBtn = Native.FindWindowEx(
+                notifyWnd, IntPtr.Zero, "Button", null);
+            if (overflowBtn != IntPtr.Zero) {
+                Native.RECT br;
+                if (Native.GetWindowRect(overflowBtn, out br))
+                    return Math.Min(nr.Left, br.Left);
+            }
+
+            return nr.Left;
+        } catch { }
+        return scr.Bounds.Right;
+    }
+
+    int CalcW() {
+        int w = 0;
+        if (S.ShowNetUp)   w += SW;
+        if (S.ShowNetDown) w += SW;
+        if (S.ShowCpu) {
+            if (S.CpuMode == "PerCore") {
+                // 24 cores -> 3 rows x 8 cols; width = cols * (barW + gap) - last gap + padding
+                int cols = (_m.CoreCount + 2) / 3;
+                w += 4 + cols * (CBAR_W + CBAR_G) - CBAR_G + 4;
+            } else {
+                w += SW;
+            }
+        }
+        if (S.ShowGpuUtil || S.ShowGpuTemp) w += SW;
+        if (S.ShowMemory)  w += SW;
+        return Math.Max(60, w);
+    }
+
+    void AllocGdi() {
+        _fLbl        = new Font("Segoe UI", 6.5f, FontStyle.Regular, GraphicsUnit.Point);
+        _fVal        = new Font("Segoe UI", 7.5f, FontStyle.Bold,    GraphicsUnit.Point);
+        _dimBrush    = new SolidBrush(Color.FromArgb(0x80, 0x80, 0x80));
+        _coreBgBrush = new SolidBrush(Color.FromArgb(0x30, 0x30, 0x30));
+        _divPen      = new Pen(Color.FromArgb(0x3C, 0x3C, 0x3C), 1f);
+        RefreshColors();
+    }
+
+    internal void RefreshColors() {
+        _cUp  = ParseHex(S.ColorNetUp,   "#00FF88");
+        _cDn  = ParseHex(S.ColorNetDown, "#00AAFF");
+        _cCpu = ParseHex(S.ColorCpu,     "#FFB300");
+        _cGpu     = ParseHex(S.ColorGpu,     "#FF6B35");
+        _cGpuTemp = ParseHex(S.ColorGpuTemp, "#FFDD44");
+        _cMem     = ParseHex(S.ColorMemory,  "#CC44FF");
+    }
+
+    protected override void Dispose(bool d) {
+        if (d) {
+            if (_timer  != null) { _timer.Stop();  _timer.Dispose(); }
+            if (_zTimer != null) { _zTimer.Stop(); _zTimer.Dispose(); }
+            if (_notify != null) { _notify.Visible = false; _notify.Dispose(); }
+            if (_m           != null) _m.Dispose();
+            if (_fLbl        != null) _fLbl.Dispose();
+            if (_fVal        != null) _fVal.Dispose();
+            if (_dimBrush    != null) _dimBrush.Dispose();
+            if (_coreBgBrush != null) _coreBgBrush.Dispose();
+            if (_divPen      != null) _divPen.Dispose();
+        }
+        base.Dispose(d);
+    }
+
+    // Creates the 16x16 sparkline bar icon used for both the tray and the settings title bar.
+    internal static Icon MakeAppIcon() {
+        using (var bmp = new Bitmap(16, 16))
+        using (var g = Graphics.FromImage(bmp)) {
+            g.Clear(Color.Transparent);
+            var bars = new[] {
+                new { C = Color.FromArgb(0xFF, 0x40, 0x40), X = 1,  H = 5  },
+                new { C = Color.FromArgb(0xFF, 0xB3, 0x00), X = 5,  H = 9  },
+                new { C = Color.FromArgb(0xFF, 0x6B, 0x35), X = 9,  H = 6  },
+                new { C = Color.FromArgb(0xCC, 0x44, 0xFF), X = 13, H = 11 },
+            };
+            foreach (var b in bars)
+                g.FillRectangle(new SolidBrush(b.C), b.X, 15 - b.H, 2, b.H);
+            return Icon.FromHandle(bmp.GetHicon());
+        }
+    }
+
+    // Loads a famfamfam silk icon embedded as a manifest resource.
+    // Resource names follow the MSBuild convention: TaskMon.icons.<name>.png
+    static Image LoadIcon(string name) {
+        var stream = typeof(OverlayForm).Assembly
+            .GetManifestResourceStream("TaskMon.icons." + name + ".png");
+        return stream != null ? Image.FromStream(stream) : null;
+    }
+
+    void BuildNotifyIcon() {
+        _notify = new NotifyIcon {
+            Icon             = MakeAppIcon(),
+            Text             = "taskmon",
+            ContextMenuStrip = _menu,
+            Visible          = true
+        };
+        _notify.DoubleClick += (o, e) => OpenSettings();
+    }
+
+    // Returns the pixel width of the CPU section (depends on CpuMode and core count).
+    int CpuSectionWidth() {
+        if (S.CpuMode == "PerCore") {
+            const int ROWS = 3;
+            int cols = (_m.CoreCount + ROWS - 1) / ROWS;
+            return 4 + cols * (CBAR_W + CBAR_G) - CBAR_G + 4;
+        }
+        return SW;
+    }
+
+    // Maps an X pixel coordinate (relative to the overlay) to a Section.
+    Section HitTest(int mouseX) {
+        int x = 0;
+        if (S.ShowNetUp)   { if (mouseX < x + SW)               return Section.NetUp;   x += SW; }
+        if (S.ShowNetDown) { if (mouseX < x + SW)               return Section.NetDown;  x += SW; }
+        if (S.ShowCpu)     { int cw = CpuSectionWidth();
+                             if (mouseX < x + cw)               return Section.Cpu;     x += cw; }
+        if (S.ShowGpuUtil || S.ShowGpuTemp)
+                           { if (mouseX < x + SW)               return Section.Gpu;     x += SW; }
+        if (S.ShowMemory)  { if (mouseX < x + SW)               return Section.Mem;              }
+        return Section.None;
+    }
+
+    // Left-click on any panel opens Resource Monitor.
+    void LaunchForSection(Section sec) {
+        if (sec != Section.None) LaunchResmon();
+    }
+
+    static void LaunchResmon()   { try { Process.Start("resmon.exe");   } catch { } }
+    static void LaunchTaskMgr()  { try { Process.Start("taskmgr.exe");  } catch { } }
+
+    void BuildMenu() {
+        _menu = new ContextMenuStrip {
+            BackColor = Color.FromArgb(0x2D, 0x2D, 0x2D),
+            ForeColor = Color.White,
+            Renderer  = new DarkRenderer()
+        };
+        var miSet     = new ToolStripMenuItem("Settings...");
+        miSet.Click  += (o, e) => OpenSettings();
+        miSet.Image   = LoadIcon("cog");
+
+        var miResmon     = new ToolStripMenuItem("Open Resource Monitor");
+        miResmon.Click  += (o, e) => LaunchResmon();
+        miResmon.Image   = LoadIcon("chart_bar");
+
+        var miTaskMgr     = new ToolStripMenuItem("Open Task Manager");
+        miTaskMgr.Click  += (o, e) => LaunchTaskMgr();
+        miTaskMgr.Image   = LoadIcon("application_view_list");
+
+        var miQuit     = new ToolStripMenuItem("Quit");
+        miQuit.Click  += (o, e) => Application.Exit();
+        miQuit.Image   = LoadIcon("door_out");
+
+        _menu.Items.AddRange(new ToolStripItem[] {
+            miSet, new ToolStripSeparator(), miResmon, miTaskMgr, new ToolStripSeparator(), miQuit
+        });
+    }
+
+    // Opens the settings dialog with the z-order timer paused so the overlay
+    // doesn't cover the ComboBox dropdown or the dialog itself.
+    void OpenSettings() {
+        _zTimer.Stop();
+        try {
+            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
+        } finally {
+            _zTimer.Start();
+        }
+    }
+
+    // -- Layered window rendering ---------------------------------------------
+    // Renders the overlay using UpdateLayeredWindow with per-pixel alpha.
+    // Background pixels use alpha=1: visually transparent (0.4% opacity) but
+    // alpha > 0 so they still receive mouse events -- no click-through.
+    internal void UpdateLayer() {
+        if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+        int w = Width, h = Height;
+
+        IntPtr screenDC = IntPtr.Zero, memDC = IntPtr.Zero;
+        IntPtr hDib = IntPtr.Zero, oldObj = IntPtr.Zero;
+        try {
+            screenDC = Native.GetDC(IntPtr.Zero);
+            memDC    = Native.CreateCompatibleDC(screenDC);
+
+            // Create a 32bpp top-down DIB for GDI+ to draw into.
+            IntPtr bits;
+            var bmi = new Native.BITMAPINFO {
+                bmiHeader = new Native.BITMAPINFOHEADER {
+                    biSize     = Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER)),
+                    biWidth    = w,
+                    biHeight   = -h, // negative = top-down scanlines
+                    biPlanes   = 1,
+                    biBitCount = 32
+                }
+            };
+            hDib   = Native.CreateDIBSection(screenDC, ref bmi, 0, out bits, IntPtr.Zero, 0);
+            oldObj = Native.SelectObject(memDC, hDib);
+
+            // GDI+ renders into the DIB.  Format32bppPArgb stores premultiplied alpha,
+            // which is what UpdateLayeredWindow (AC_SRC_ALPHA) requires.
+            using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, bits))
+            using (var g = Graphics.FromImage(bmp)) {
+                // Alpha=1 background: visually ~transparent but receives mouse input.
+                g.Clear(Color.FromArgb(1, 0, 0, 0));
+
+                g.SmoothingMode     = SmoothingMode.None;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                DrawContent(g, w, h);
+            }
+
+            // Compose onto screen with per-pixel alpha (SourceConstantAlpha scaled by Opacity).
+            byte globalAlpha = (byte)Math.Max(1, Math.Min(255,
+                (int)(Clamp01(S.Opacity) * 255)));
+            var blend = new Native.BLENDFUNCTION {
+                BlendOp             = 0,   // AC_SRC_OVER
+                BlendFlags          = 0,
+                SourceConstantAlpha = globalAlpha,
+                AlphaFormat         = 1    // AC_SRC_ALPHA -- use per-pixel alpha
+            };
+            var dst = new Native.PTWIN { x = Left, y = Top };
+            var src = new Native.PTWIN { x = 0,    y = 0   };
+            var sz  = new Native.SZWIN { cx = w,   cy = h  };
+            Native.UpdateLayeredWindow(Handle, screenDC,
+                ref dst, ref sz, memDC, ref src, 0, ref blend, Native.ULW_ALPHA);
+        } finally {
+            if (oldObj   != IntPtr.Zero) Native.SelectObject(memDC, oldObj);
+            if (hDib     != IntPtr.Zero) Native.DeleteObject(hDib);
+            if (memDC    != IntPtr.Zero) Native.DeleteDC(memDC);
+            if (screenDC != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screenDC);
+        }
+    }
+
+    void DrawContent(Graphics g, int w, int h) {
+        // No background fill -- background pixels stay at alpha=1 (set in UpdateLayer),
+        // making them visually transparent while still receiving mouse events.
+        int x = 0;
+
+        if (S.ShowNetUp)
+            DrawSection(g, ref x, h, "UPLOAD \u2191",
+                SpeedStr(_m.NetUpBps), _cUp, _m.HNetUp, _m.NetPeak);
+        if (S.ShowNetDown)
+            DrawSection(g, ref x, h, "DOWNLOAD \u2193",
+                SpeedStr(_m.NetDnBps), _cDn, _m.HNetDn, _m.NetPeak);
+        if (S.ShowCpu) {
+            if (S.CpuMode == "PerCore")
+                DrawCoreGrid(g, ref x, h);
+            else
+                DrawSection(g, ref x, h, "CPU",
+                    string.Format("{0:F0}%", _m.CpuTotal), _cCpu, _m.HCpu, 100f);
+        }
+        if (S.ShowGpuUtil || S.ShowGpuTemp)
+            DrawGpuSection(g, ref x, h);
+        if (S.ShowMemory)
+            DrawSection(g, ref x, h, "MEM",
+                string.Format("{0:F0}%", _m.MemPct), _cMem, _m.HMem, 100f);
+    }
+
+    // GPU section: sparkline driven by utilisation; value line shows util% in one
+    // colour and temp in a distinct colour so they're easy to tell apart at a glance.
+    void DrawGpuSection(Graphics g, ref int x, int h) {
+        if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
+        DrawSparkline(g, _m.HGpu, new Rectangle(x, 0, SW, h), _cGpu, 100f);
+        g.DrawString("GPU", _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
+
+        // Value line: util and/or temp in separate colours.
+        if (S.ShowGpuUtil && S.ShowGpuTemp) {
+            // Draw util% left-aligned in GPU colour, temp right-aligned in temp colour.
+            string util = string.Format("{0:F0}%", _m.GpuUtil);
+            string temp = string.Format("{0}\u00B0C", _m.GpuTempC);
+            var rf = new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f);
+            var sfL = new StringFormat { Alignment = StringAlignment.Near,
+                                         LineAlignment = StringAlignment.Center };
+            var sfR = new StringFormat { Alignment = StringAlignment.Far,
+                                         LineAlignment = StringAlignment.Center };
+            using (var bu = new SolidBrush(_cGpu))
+            using (var bt = new SolidBrush(_cGpuTemp)) {
+                g.DrawString(util, _fVal, bu, rf, sfL);
+                g.DrawString(temp, _fVal, bt, rf, sfR);
+            }
+        } else if (S.ShowGpuUtil) {
+            using (var b = new SolidBrush(_cGpu))
+                g.DrawString(string.Format("{0:F0}%", _m.GpuUtil), _fVal, b,
+                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
+                    new StringFormat { Alignment = StringAlignment.Center,
+                                       LineAlignment = StringAlignment.Center });
+        } else {
+            using (var b = new SolidBrush(_cGpuTemp))
+                g.DrawString(string.Format("{0}\u00B0C", _m.GpuTempC), _fVal, b,
+                    new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
+                    new StringFormat { Alignment = StringAlignment.Center,
+                                       LineAlignment = StringAlignment.Center });
+        }
+        x += SW;
+    }
+
+    // Draw one metric section: sparkline fills the background, text is overlaid.
+    void DrawSection(Graphics g, ref int x, int h,
+                     string lbl, string val, Color col,
+                     CircularBuffer hist, float scale) {
+        if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
+        // Sparkline fills the full section rectangle as a subtle coloured background.
+        DrawSparkline(g, hist, new Rectangle(x, 0, SW, h), col, scale);
+        // Label: small dim text at the top of the section.
+        g.DrawString(lbl, _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
+        // Value: bold coloured text centred in the lower half.
+        using (var b = new SolidBrush(col))
+            g.DrawString(val, _fVal, b,
+                new RectangleF(x + 2, h * 0.42f, SW - 4, h * 0.58f),
+                new StringFormat {
+                    Alignment     = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center,
+                    Trimming      = StringTrimming.Character
+                });
+        x += SW;
+    }
+
+    // Filled-area sparkline.  Semi-transparent fill + full-opacity edge line.
+    void DrawSparkline(Graphics g, CircularBuffer hist,
+                       Rectangle r, Color col, float scale) {
+        hist.CopyTo(_buf);
+        int n = _buf.Length; if (n < 2 || r.Width < 2) return;
+        float sc = scale > 0f ? scale : 100f;
+
+        var pts = new PointF[n + 2];
+        pts[0]     = new PointF(r.Left,  r.Bottom);
+        pts[n + 1] = new PointF(r.Right, r.Bottom);
+        for (int i = 0; i < n; i++) {
+            float pct = Math.Min(_buf[i] / sc, 1f);
+            pts[i + 1] = new PointF(
+                r.Left + (float)i / (n - 1) * r.Width,
+                r.Bottom - pct * r.Height);
+        }
+        // 45/255 ~= 18% alpha fill -- subtle hint of colour under the text
+        using (var fill = new SolidBrush(Color.FromArgb(45, col)))
+            g.FillPolygon(fill, pts);
+        // Full-brightness edge line for crisp readability
+        var line = new PointF[n];
+        for (int i = 0; i < n; i++) line[i] = pts[i + 1];
+        using (var pen = new Pen(col, 1.2f)) g.DrawLines(pen, line);
+    }
+
+    // XMeters-style per-core CPU grid.
+    // 24 cores -> 3 rows x 8 cols of vertical bars with a green->yellow->red heat map.
+    void DrawCoreGrid(Graphics g, ref int x, int h) {
+        const int ROWS = 3;
+        int cols  = (_m.CoreCount + ROWS - 1) / ROWS; // ceil(24/3) = 8
+        int gridW = cols * (CBAR_W + CBAR_G) - CBAR_G;
+        int secW  = 4 + gridW + 4;
+
+        if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
+        int gx = x + 4;
+
+        // "CPU" label above the grid
+        g.DrawString("CPU", _fLbl, _dimBrush,
+            new RectangleF(gx, 0, gridW, 9),
+            new StringFormat { Alignment = StringAlignment.Center });
+
+        int rowsH = h - 10;                          // vertical space for bars
+        int rowH  = (rowsH - (ROWS - 1) * 2) / ROWS; // bar height with 2px row gaps
+
+        for (int row = 0; row < ROWS; row++) {
+            int yt = 10 + row * (rowH + 2);
+            for (int col = 0; col < cols; col++) {
+                int idx = row * cols + col;
+                if (idx >= _m.CoreCount) break;
+
+                float pct = Math.Min(_m.CpuCores[idx] / 100f, 1f);
+                int bx = gx + col * (CBAR_W + CBAR_G);
+                int bh = Math.Max(1, (int)(pct * rowH));
+                int by = yt + (rowH - bh); // bars grow upward from bottom of row
+
+                g.FillRectangle(_coreBgBrush, bx, yt, CBAR_W, rowH);
+                using (var br = new SolidBrush(HeatColor(pct)))
+                    g.FillRectangle(br, bx, by, CBAR_W, bh);
+            }
+        }
+        x += secW;
+    }
+
+    // Smooth heat-map colour: green (0%) -> yellow (50%) -> red (100%)
+    static Color HeatColor(float p) {
+        if (p <= 0.5f) {
+            int r = (int)(p * 2f * 255f);
+            return Color.FromArgb(r, 200, 0);
+        } else {
+            int g2 = (int)((1f - (p - 0.5f) * 2f) * 200f);
+            return Color.FromArgb(255, g2, 0);
+        }
+    }
+
+    static string SpeedStr(float bps) {
+        if (bps >= 1073741824f) return string.Format("{0:F1}GB/s", bps / 1073741824f);
+        if (bps >=    1048576f) return string.Format("{0:F1}MB/s", bps / 1048576f);
+        if (bps >=       1024f) return string.Format("{0:F0}KB/s", bps / 1024f);
+        return string.Format("{0:F0}B/s", bps);
+    }
+    static double Clamp01(double v) { return Math.Max(0.1, Math.Min(1.0, v)); }
+    static Color  ParseHex(string h, string fb) {
+        try { return ColorTranslator.FromHtml(h); }
+        catch { return ColorTranslator.FromHtml(fb); }
+    }
+}
+
+} // namespace TaskMon

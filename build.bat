@@ -4,29 +4,16 @@ setlocal
 echo Stopping any running taskmon instance...
 call "%~dp0kill.bat"
 
-set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-if not exist "%CSC%" (
-    echo ERROR: .NET Framework 4 compiler not found.
-    echo Expected: %CSC%
+set MSBUILD=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe
+if not exist "%MSBUILD%" (
+    echo ERROR: MSBuild not found.
+    echo Expected: %MSBUILD%
     pause
     exit /b 1
 )
 
-set OUT=%LOCALAPPDATA%\taskmon
-if not exist "%OUT%" mkdir "%OUT%"
-set DLL=%OUT%\taskmon.dll
-
-echo Building taskmon.cs ...
-"%CSC%" ^
-    /nologo ^
-    /target:library ^
-    /optimize+ ^
-    /out:"%DLL%" ^
-    /r:System.Windows.Forms.dll ^
-    /r:System.Drawing.dll ^
-    /r:System.Core.dll ^
-    /r:System.dll ^
-    "%~dp0taskmon.cs"
+echo Building taskmon.csproj ...
+"%MSBUILD%" "%~dp0taskmon.csproj" /nologo /v:minimal /p:Configuration=Release
 
 if %errorlevel% neq 0 (
     echo.
@@ -36,5 +23,5 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo Build succeeded: %DLL%
+echo Build succeeded: %LOCALAPPDATA%\taskmon\taskmon.dll
 echo You can now launch taskmon via taskmon.vbs
