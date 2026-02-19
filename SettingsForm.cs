@@ -47,9 +47,17 @@ public class SettingsForm : Form {
         Icon            = OverlayForm.MakeAppIcon();
 
         var tabs = new TabControl { Dock = DockStyle.Fill };
-        tabs.TabPages.Add(TabDisplay());
-        tabs.TabPages.Add(TabColours());
-        tabs.TabPages.Add(TabBehaviour());
+        var imgList = new ImageList { ImageSize = new Size(16, 16), ColorDepth = ColorDepth.Depth32Bit };
+        imgList.Images.Add(OverlayForm.LoadIcon("monitor") ?? new Bitmap(16, 16));
+        imgList.Images.Add(OverlayForm.LoadIcon("palette") ?? new Bitmap(16, 16));
+        imgList.Images.Add(OverlayForm.LoadIcon("cog")     ?? new Bitmap(16, 16));
+        tabs.ImageList = imgList;
+        var pgDisplay  = TabDisplay();  pgDisplay.ImageIndex  = 0;
+        var pgColours  = TabColours();  pgColours.ImageIndex  = 1;
+        var pgBehaviour = TabBehaviour(); pgBehaviour.ImageIndex = 2;
+        tabs.TabPages.Add(pgDisplay);
+        tabs.TabPages.Add(pgColours);
+        tabs.TabPages.Add(pgBehaviour);
 
         var foot = new Panel {
             Dock = DockStyle.Bottom, Height = 50,
@@ -84,13 +92,22 @@ public class SettingsForm : Form {
         return new TabPage(t) { BackColor = BG };
     }
 
-    // Section header: blue-tinted bold label + thin separator line.
-    void SecHead(Control p, string icon, string text, ref int y) {
+    // Section header: 16x16 silk icon + blue bold label + thin separator line.
+    void SecHead(Control p, string iconName, string text, ref int y) {
+        var img = OverlayForm.LoadIcon(iconName);
+        if (img != null) {
+            p.Controls.Add(new PictureBox {
+                Image = img, SizeMode = PictureBoxSizeMode.Normal,
+                Location = new Point(8, y + 1), Size = new Size(16, 16),
+                BackColor = Color.Transparent
+            });
+        }
         p.Controls.Add(new Label {
-            Text = icon + "  " + text,
-            Location = new Point(8, y), Size = new Size(420, 18),
+            Text      = text,
+            Location  = new Point(img != null ? 28 : 8, y),
+            Size      = new Size(img != null ? 400 : 420, 18),
             ForeColor = ACCENT,
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
+            Font      = new Font("Segoe UI", 8.5f, FontStyle.Bold)
         });
         p.Controls.Add(new Panel {
             Location = new Point(8, y + 19), Size = new Size(420, 1), BackColor = SEP
@@ -119,7 +136,7 @@ public class SettingsForm : Form {
     TabPage TabDisplay() {
         var p = TP("Display"); int y = 10;
 
-        SecHead(p, "\u25A0", "Metrics to show", ref y);
+        SecHead(p, "chart_bar", "Metrics to show", ref y);
         MetricRow(p, ref _cbUp,  "Upload speed  (NET \u2191)",                    SafeColor(_d.ColorNetUp),   _d.ShowNetUp,   ref y);
         MetricRow(p, ref _cbDn,  "Download speed  (NET \u2193)",                  SafeColor(_d.ColorNetDown), _d.ShowNetDown, ref y);
         MetricRow(p, ref _cbCpu, "CPU utilisation",                               SafeColor(_d.ColorCpu),     _d.ShowCpu,     ref y);
@@ -128,13 +145,13 @@ public class SettingsForm : Form {
         MetricRow(p, ref _cbMem, "Memory usage %",                               SafeColor(_d.ColorMemory),  _d.ShowMemory,  ref y);
         y += 6;
 
-        SecHead(p, "\u25A3", "CPU display mode", ref y);
+        SecHead(p, "computer", "CPU display mode", ref y);
         _rbAgg = RB("Aggregate \u2014 single sparkline for overall CPU%",             18, y, _d.CpuMode != "PerCore"); y += 21;
         _rbPC  = RB("Per-core bars \u2014 XMeters-style grid  (24 bars, 3\u00D78)",  18, y, _d.CpuMode == "PerCore"); y += 10;
         p.Controls.Add(_rbAgg); p.Controls.Add(_rbPC);
         y += 16;
 
-        SecHead(p, "\u25BA", "Network adapter", ref y);
+        SecHead(p, "connect", "Network adapter", ref y);
         _cboNet = new ComboBox {
             Location = new Point(18, y), Size = new Size(410, 22),
             DropDownStyle = ComboBoxStyle.DropDownList
@@ -156,7 +173,7 @@ public class SettingsForm : Form {
     // -- Colours tab ----------------------------------------------------------
     TabPage TabColours() {
         var p = TP("Colours"); int y = 10;
-        int dummy = y; SecHead(p, "\u25CF", "Sparkline colours  \u2014  click swatch to change", ref dummy); y = dummy;
+        int dummy = y; SecHead(p, "palette", "Sparkline colours  \u2014  click swatch to change", ref dummy); y = dummy;
         ColRow(p, "Upload  (NET \u2191)",    _d.ColorNetUp,   ref _bUp,      ref y);
         ColRow(p, "Download  (NET \u2193)",  _d.ColorNetDown, ref _bDn,      ref y);
         ColRow(p, "CPU",                     _d.ColorCpu,     ref _bCpu,     ref y);
@@ -200,7 +217,7 @@ public class SettingsForm : Form {
     // -- Behaviour tab --------------------------------------------------------
     TabPage TabBehaviour() {
         var p = TP("Behaviour"); int y = 10;
-        SecHead(p, "\u23F1", "Update interval", ref y);
+        SecHead(p, "clock", "Update interval", ref y);
         _rb500 = RB("500 ms \u2014 snappier, slightly more CPU",  18, y, _d.UpdateIntervalMs == 500);  y += 22;
         _rb1k  = RB("1 second \u2014 recommended",                18, y, _d.UpdateIntervalMs == 1000); y += 22;
         _rb2k  = RB("2 seconds \u2014 very quiet",                18, y, _d.UpdateIntervalMs == 2000); y += 10;
@@ -208,7 +225,7 @@ public class SettingsForm : Form {
         p.Controls.Add(_rb500); p.Controls.Add(_rb1k); p.Controls.Add(_rb2k);
         y += 16;
 
-        SecHead(p, "\u25D1", "Window opacity", ref y);
+        SecHead(p, "contrast", "Window opacity", ref y);
         _tbOp = new TrackBar {
             Location = new Point(18, y), Size = new Size(400, 30),
             Minimum = 30, Maximum = 100, TickFrequency = 10,
@@ -224,7 +241,7 @@ public class SettingsForm : Form {
         y += 28;
 
         y += 6;
-        SecHead(p, "\u25B6", "Startup", ref y);
+        SecHead(p, "bullet_go", "Startup", ref y);
         _cbStartup = new CheckBox {
             Text     = "Launch taskmon automatically when Windows starts",
             Location = new Point(18, y), Size = new Size(400, 20),

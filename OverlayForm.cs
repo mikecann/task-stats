@@ -235,7 +235,7 @@ public class OverlayForm : Form {
 
     // Loads a famfamfam silk icon embedded as a manifest resource.
     // Resource names follow the MSBuild convention: TaskMon.icons.<name>.png
-    static Image LoadIcon(string name) {
+    internal static Image LoadIcon(string name) {
         var stream = typeof(OverlayForm).Assembly
             .GetManifestResourceStream("TaskMon.icons." + name + ".png");
         return stream != null ? Image.FromStream(stream) : null;
