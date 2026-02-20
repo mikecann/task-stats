@@ -61,12 +61,69 @@ static class Native {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetForegroundWindow(IntPtr hWnd);
+
     [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+    public const uint LWA_COLORKEY = 0x00000001;
+    public const uint LWA_ALPHA    = 0x00000002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll")]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    public const int GWL_STYLE = -16;
+    public const int WS_CHILD  = 0x40000000;
+    public const int WS_POPUP  = unchecked((int)0x80000000);
+    public const int WS_VISIBLE = 0x10000000;
+    public const int WS_CLIPSIBLINGS = 0x04000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+
+    [DllImport("user32.dll")]
+    public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
     public const uint SWP_NOZORDER    = 0x0004;
     public const int  WS_EX_LAYERED   = 0x00080000;
     public const int  ULW_ALPHA       = 2;
+
+    public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+    
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr GetModuleHandle(string lpModuleName);
+    
+    public const int WH_MOUSE_LL = 14;
+    public const int WM_LBUTTONDOWN = 0x0201;
+    public const int WM_RBUTTONDOWN = 0x0204;
+    public const int WM_LBUTTONUP   = 0x0202;
+    public const int WM_RBUTTONUP   = 0x0205;
+    
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLHOOKSTRUCT {
+        public POINT pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
 
     // UpdateLayeredWindow -- renders a per-pixel-alpha bitmap onto the window.
     // Background pixels use alpha=1 (visually transparent, still receive mouse input).

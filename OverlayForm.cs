@@ -35,17 +35,18 @@ public class OverlayForm : Form {
     Metrics  _m;
     internal string _scriptDir; // set by App.Run() -- needed to update startup reg entry
     internal System.Windows.Forms.Timer _timer;
-    System.Windows.Forms.Timer _zTimer;
     ContextMenuStrip _menu;
     NotifyIcon _notify;
-    int _assertingZ;
 
     // Pre-allocated GDI resources -- created once in AllocGdi(), never in paint loop.
     Font       _fLbl, _fVal;
     SolidBrush _dimBrush, _coreBgBrush;
     Pen        _divPen;
     Color      _cUp, _cDn, _cCpu, _cGpu, _cGpuTemp, _cMem;
-    float[]    _buf = new float[60]; // scratch buffer for CopyTo inside UpdateLayer
+    float[]    _buf = new float[60]; // scratch buffer for CopyTo
+
+    Native.LowLevelMouseProc _mouseProc;
+    IntPtr _mouseHookId = IntPtr.Zero;
 
     // -- Layout constants ------------------------------------------------------
     const int SW     = 70;  // standard section width (px)
@@ -60,34 +61,50 @@ public class OverlayForm : Form {
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition   = FormStartPosition.Manual;
-        TopMost         = true;
         ShowInTaskbar   = false;
-        BackColor       = Color.Black; // never painted; UpdateLayeredWindow owns the visual
-        // Suppress default WinForms painting -- our visual comes entirely from UpdateLayer().
+        BackColor       = Color.FromArgb(16, 16, 16); // Perfectly matches key to become visually transparent
+        TransparencyKey = Color.FromArgb(16, 16, 16);
+        
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer, true);
-        MouseDown += (o, e) => {
-            if (e.Button == MouseButtons.Right) {
-                // SetForegroundWindow lets the menu's message filter detect outside
-                // clicks, so it auto-closes when the user clicks elsewhere.
-                Native.SetForegroundWindow(Handle);
-                _menu.Show(Cursor.Position);
-            } else if (e.Button == MouseButtons.Left) {
-                LaunchForSection(HitTest(e.X));
-            }
-        };
+                 
+        // We use a Low-Level Mouse Hook because perfectly keyed-out transparent pixels 
+        // fall through the normal hit test and receive no Windows mouse messages.
+        _mouseProc = MouseHookCallback;
+        _mouseHookId = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc,
+            Native.GetModuleHandle(null), 0);
 
         BuildMenu();
         BuildNotifyIcon();
-        DoLayout();
 
         _timer = new System.Windows.Forms.Timer { Interval = Math.Max(250, s.UpdateIntervalMs) };
         _timer.Tick += (o, e) => Tick();
         _timer.Start();
+    }
 
-        _zTimer = new System.Windows.Forms.Timer { Interval = 100 };
-        _zTimer.Tick += (o, e) => AssertTopmost();
-        _zTimer.Start();
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        // We defer SetParent to OnShown to prevent WinForms from resetting it.
+    }
+
+    protected override void OnShown(EventArgs e) {
+        base.OnShown(e);
+        IntPtr trayWnd = Native.FindWindow("Shell_TrayWnd", null);
+        if (trayWnd != IntPtr.Zero) {
+            int style = Native.GetWindowLong(Handle, Native.GWL_STYLE);
+            style = (style & ~Native.WS_POPUP) | Native.WS_CHILD | Native.WS_VISIBLE | Native.WS_CLIPSIBLINGS;
+            Native.SetWindowLong(Handle, Native.GWL_STYLE, style);
+            Native.SetParent(Handle, trayWnd);
+            
+            byte globalAlpha = (byte)Math.Max(1, Math.Min(255, (int)(Clamp01(S.Opacity) * 255)));
+            // 0x00101010 is the COLORREF (0x00bbggrr) for RGB(16, 16, 16)
+            Native.SetLayeredWindowAttributes(Handle, 0x00101010, globalAlpha, Native.LWA_COLORKEY | Native.LWA_ALPHA);
+            
+            // Put our window at the top of the Z-order so it isn't hidden by the DesktopWindowContentBridge
+            Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, 
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+        DoLayout();
     }
 
     // WS_EX_NOACTIVATE: clicks do not steal keyboard focus.
@@ -100,39 +117,28 @@ public class OverlayForm : Form {
 
     void Tick() {
         _m.Sample();
-        UpdateLayer();
-    }
-
-    void AssertTopmost() {
-        Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
-            Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-    }
-
-    protected override void WndProc(ref Message m) {
-        base.WndProc(ref m);
-        const int WM_WINDOWPOSCHANGED = 0x0047;
-        if (m.Msg == WM_WINDOWPOSCHANGED && _assertingZ == 0) {
-            ++_assertingZ;
-            AssertTopmost();
-            --_assertingZ;
-        }
+        DoLayout();
+        Invalidate();
     }
 
     // Position the overlay just to the left of the system tray / clock area.
     internal void DoLayout() {
-        var scr = Screen.PrimaryScreen;
-        int tbH = Math.Max(32, scr.Bounds.Height - scr.WorkingArea.Height);
-        int w   = CalcW();
-        int x   = TrayLeftEdge(scr) - w;
-        Size     = new Size(w, tbH);
-        Location = new Point(x, scr.Bounds.Bottom - tbH);
-        // UpdateLayeredWindow encodes position and size, so re-render after any layout change.
-        if (IsHandleCreated) UpdateLayer();
-    }
+        IntPtr trayWnd = Native.FindWindow("Shell_TrayWnd", null);
+        if (trayWnd == IntPtr.Zero) return;
 
-    protected override void OnShown(EventArgs e) {
-        base.OnShown(e);
-        DoLayout();
+        Native.RECT trayRect;
+        if (!Native.GetWindowRect(trayWnd, out trayRect)) return;
+        int tbH = trayRect.Bottom - trayRect.Top;
+
+        int w = CalcW();
+        int leftEdgeScreen = TrayLeftEdge(Screen.PrimaryScreen);
+        int targetLeftScreen = leftEdgeScreen - w;
+
+        var pt = new Native.POINT { X = targetLeftScreen, Y = trayRect.Top };
+        Native.ScreenToClient(trayWnd, ref pt);
+
+        Size = new Size(w, tbH);
+        Location = new Point(pt.X, 0); 
     }
 
     // Returns the screen-coordinate left edge of the system tray notification area,
@@ -216,10 +222,34 @@ public class OverlayForm : Form {
         _cMem     = ParseHex(S.ColorMemory,  "#CC44FF");
     }
 
+    IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
+        if (nCode >= 0 && (wParam == (IntPtr)Native.WM_LBUTTONDOWN || wParam == (IntPtr)Native.WM_RBUTTONDOWN || wParam == (IntPtr)Native.WM_LBUTTONUP || wParam == (IntPtr)Native.WM_RBUTTONUP)) {
+            var hookStruct = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
+            var pt = new Point(hookStruct.pt.X, hookStruct.pt.Y);
+
+            // Bounds hit test using screen coordinates
+            var scrRect = RectangleToScreen(ClientRectangle);
+            if (scrRect.Contains(pt)) {
+                if (wParam == (IntPtr)Native.WM_RBUTTONDOWN) {
+                    Native.SetForegroundWindow(Handle);
+                    _menu.Show(Cursor.Position);
+                } else if (wParam == (IntPtr)Native.WM_LBUTTONDOWN) {
+                    var clPt = PointToClient(pt);
+                    LaunchForSection(HitTest(clPt.X));
+                }
+                return new IntPtr(1); // Swallow the event
+            }
+        }
+        return Native.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
+    }
+
     protected override void Dispose(bool d) {
+        if (_mouseHookId != IntPtr.Zero) {
+            Native.UnhookWindowsHookEx(_mouseHookId);
+            _mouseHookId = IntPtr.Zero;
+        }
         if (d) {
             if (_timer  != null) { _timer.Stop();  _timer.Dispose(); }
-            if (_zTimer != null) { _zTimer.Stop(); _zTimer.Dispose(); }
             if (_notify != null) { _notify.Visible = false; _notify.Dispose(); }
             if (_m           != null) _m.Dispose();
             if (_fLbl        != null) _fLbl.Dispose();
@@ -324,77 +354,22 @@ public class OverlayForm : Form {
         });
     }
 
-    // Opens the settings dialog with the z-order timer paused so the overlay
-    // doesn't cover the ComboBox dropdown or the dialog itself.
+    // Opens the settings dialog.
     void OpenSettings() {
-        _zTimer.Stop();
-        try {
-            using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
-        } finally {
-            _zTimer.Start();
-        }
+        using (var dlg = new SettingsForm(S, this)) dlg.ShowDialog();
     }
 
-    // -- Layered window rendering ---------------------------------------------
-    // Renders the overlay using UpdateLayeredWindow with per-pixel alpha.
-    // Background pixels use alpha=1: visually transparent (0.4% opacity) but
-    // alpha > 0 so they still receive mouse events -- no click-through.
-    internal void UpdateLayer() {
-        if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
-        int w = Width, h = Height;
+    // -- Standard WinForms painting ---------------------------------------------
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);
+        if (Width <= 0 || Height <= 0) return;
 
-        IntPtr screenDC = IntPtr.Zero, memDC = IntPtr.Zero;
-        IntPtr hDib = IntPtr.Zero, oldObj = IntPtr.Zero;
-        try {
-            screenDC = Native.GetDC(IntPtr.Zero);
-            memDC    = Native.CreateCompatibleDC(screenDC);
+        var g = e.Graphics;
+        g.SmoothingMode     = SmoothingMode.None;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
 
-            // Create a 32bpp top-down DIB for GDI+ to draw into.
-            IntPtr bits;
-            var bmi = new Native.BITMAPINFO {
-                bmiHeader = new Native.BITMAPINFOHEADER {
-                    biSize     = Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER)),
-                    biWidth    = w,
-                    biHeight   = -h, // negative = top-down scanlines
-                    biPlanes   = 1,
-                    biBitCount = 32
-                }
-            };
-            hDib   = Native.CreateDIBSection(screenDC, ref bmi, 0, out bits, IntPtr.Zero, 0);
-            oldObj = Native.SelectObject(memDC, hDib);
-
-            // GDI+ renders into the DIB.  Format32bppPArgb stores premultiplied alpha,
-            // which is what UpdateLayeredWindow (AC_SRC_ALPHA) requires.
-            using (var bmp = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, bits))
-            using (var g = Graphics.FromImage(bmp)) {
-                // Alpha=1 background: visually ~transparent but receives mouse input.
-                g.Clear(Color.FromArgb(1, 0, 0, 0));
-
-                g.SmoothingMode     = SmoothingMode.None;
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-                DrawContent(g, w, h);
-            }
-
-            // Compose onto screen with per-pixel alpha (SourceConstantAlpha scaled by Opacity).
-            byte globalAlpha = (byte)Math.Max(1, Math.Min(255,
-                (int)(Clamp01(S.Opacity) * 255)));
-            var blend = new Native.BLENDFUNCTION {
-                BlendOp             = 0,   // AC_SRC_OVER
-                BlendFlags          = 0,
-                SourceConstantAlpha = globalAlpha,
-                AlphaFormat         = 1    // AC_SRC_ALPHA -- use per-pixel alpha
-            };
-            var dst = new Native.PTWIN { x = Left, y = Top };
-            var src = new Native.PTWIN { x = 0,    y = 0   };
-            var sz  = new Native.SZWIN { cx = w,   cy = h  };
-            Native.UpdateLayeredWindow(Handle, screenDC,
-                ref dst, ref sz, memDC, ref src, 0, ref blend, Native.ULW_ALPHA);
-        } finally {
-            if (oldObj   != IntPtr.Zero) Native.SelectObject(memDC, oldObj);
-            if (hDib     != IntPtr.Zero) Native.DeleteObject(hDib);
-            if (memDC    != IntPtr.Zero) Native.DeleteDC(memDC);
-            if (screenDC != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screenDC);
-        }
+        g.Clear(BackColor);
+        DrawContent(g, Width, Height);
     }
 
     void DrawContent(Graphics g, int w, int h) {
@@ -435,14 +410,14 @@ public class OverlayForm : Form {
                                         LineAlignment = StringAlignment.Near };
         var sfLblF = new StringFormat { Alignment = StringAlignment.Far,
                                         LineAlignment = StringAlignment.Near };
-        ShadowStr(g, "GPU", _fLbl, _dimBrush,
+        g.DrawString("GPU", _fLbl, _dimBrush,
             new RectangleF(x + 3, 1, SW - 6, h * 0.45f), sfLblN);
         // Show util% (or temp if util is hidden) right-aligned in the label row.
         string gpuHdr = S.ShowGpuUtil
             ? string.Format("{0:F0}%", _m.GpuUtil)
             : string.Format("{0}\u00B0C", _m.GpuTempC);
         using (var b = new SolidBrush(S.ShowGpuUtil ? _cGpu : _cGpuTemp))
-            ShadowStr(g, gpuHdr, _fLbl, b,
+            g.DrawString(gpuHdr, _fLbl, b,
                 new RectangleF(x + 3, 1, SW - 6, h * 0.45f), sfLblF);
 
         // When both util and temp are shown, keep temp in the body since the label
@@ -465,14 +440,14 @@ public class OverlayForm : Form {
         if (x > 0) g.DrawLine(_divPen, x, 2, x, h - 2);
         DrawSparkline(g, hist, new Rectangle(x, 0, SW, h), col, scale);
         // Label: small dim text at the top-left.
-        ShadowStr(g, lbl, _fLbl, _dimBrush,
-            new RectangleF(x + 3, 1, SW - 6, h * 0.45f), null);
+        g.DrawString(lbl, _fLbl, _dimBrush,
+            new RectangleF(x + 3, 1, SW - 6, h * 0.45f));
         // Optional right-aligned value in the label row.
         if (headerVal != null) {
             var sfR = new StringFormat { Alignment = StringAlignment.Far,
                                          LineAlignment = StringAlignment.Near };
             using (var b = new SolidBrush(col))
-                ShadowStr(g, headerVal, _fLbl, b,
+                g.DrawString(headerVal, _fLbl, b,
                     new RectangleF(x + 3, 1, SW - 6, h * 0.45f), sfR);
         }
         // Value: bold coloured text centred in the lower half.
@@ -511,11 +486,15 @@ public class OverlayForm : Form {
         var pts = new PointF[n + 2];
         pts[0]     = new PointF(r.Left,  r.Bottom);
         pts[n + 1] = new PointF(r.Right, r.Bottom);
+        
+        // Reserve 14px at the top so the graph never obscures the label text
+        float maxH = Math.Max(1f, r.Height - 14f);
+        
         for (int i = 0; i < n; i++) {
             float pct = Math.Min(_buf[i] / sc, 1f);
             pts[i + 1] = new PointF(
                 r.Left + (float)i / (n - 1) * r.Width,
-                r.Bottom - pct * r.Height);
+                r.Bottom - pct * maxH);
         }
         // 45/255 ~= 18% alpha fill -- subtle hint of colour under the text
         using (var fill = new SolidBrush(Color.FromArgb(45, col)))
@@ -542,10 +521,10 @@ public class OverlayForm : Form {
                                        LineAlignment = StringAlignment.Near };
         var sfPct = new StringFormat { Alignment = StringAlignment.Far,
                                        LineAlignment = StringAlignment.Near };
-        ShadowStr(g, "CPU", _fLbl, _dimBrush,
+        g.DrawString("CPU", _fLbl, _dimBrush,
             new RectangleF(gx, 1, gridW, 9), sfLbl);
         using (var b = new SolidBrush(_cCpu))
-            ShadowStr(g, string.Format("{0:F0}%", _m.CpuTotal), _fLbl, b,
+            g.DrawString(string.Format("{0:F0}%", _m.CpuTotal), _fLbl, b,
                 new RectangleF(gx, 1, gridW, 9), sfPct);
 
         int rowsH = h - 10;                          // vertical space for bars
