@@ -136,8 +136,12 @@ public class OverlayForm : Form {
     }
 
     // Returns the screen-coordinate left edge of the system tray notification area,
-    // accounting for the "show hidden icons" overflow Button which sits to the left
-    // of TrayNotifyWnd on some Windows builds and would otherwise be covered.
+    // accounting for the "show hidden icons" overflow button so we never cover it.
+    //
+    // Win10 / early Win11: the chevron is a Button child of TrayNotifyWnd.
+    // Win11 22H2+:         the chevron moved to a Button child of Shell_TrayWnd
+    //                      that sits to the LEFT of TrayNotifyWnd.
+    // We check both locations and take the minimum.
     static int TrayLeftEdge(Screen scr) {
         try {
             IntPtr trayWnd = Native.FindWindow("Shell_TrayWnd", null);
@@ -150,17 +154,28 @@ public class OverlayForm : Form {
             Native.RECT nr;
             if (!Native.GetWindowRect(notifyWnd, out nr)) return scr.Bounds.Right;
 
-            // The overflow "show hidden icons" Button lives inside TrayNotifyWnd.
-            // Its left edge is the true leftmost point we must not cover.
-            IntPtr overflowBtn = Native.FindWindowEx(
-                notifyWnd, IntPtr.Zero, "Button", null);
-            if (overflowBtn != IntPtr.Zero) {
+            int left = nr.Left;
+
+            // Check for chevron Button inside TrayNotifyWnd (Win10 / early Win11).
+            IntPtr btn = Native.FindWindowEx(notifyWnd, IntPtr.Zero, "Button", null);
+            if (btn != IntPtr.Zero) {
                 Native.RECT br;
-                if (Native.GetWindowRect(overflowBtn, out br))
-                    return Math.Min(nr.Left, br.Left);
+                if (Native.GetWindowRect(btn, out br))
+                    left = Math.Min(left, br.Left);
             }
 
-            return nr.Left;
+            // Check for chevron Button as a direct child of Shell_TrayWnd (Win11 22H2+).
+            // Enumerate all Button children and take the leftmost one that sits to the
+            // left of TrayNotifyWnd (i.e. it is the overflow/chevron, not some other btn).
+            IntPtr child = Native.FindWindowEx(trayWnd, IntPtr.Zero, "Button", null);
+            while (child != IntPtr.Zero) {
+                Native.RECT br;
+                if (Native.GetWindowRect(child, out br) && br.Left < nr.Left)
+                    left = Math.Min(left, br.Left);
+                child = Native.FindWindowEx(trayWnd, child, "Button", null);
+            }
+
+            return left;
         } catch { }
         return scr.Bounds.Right;
     }
