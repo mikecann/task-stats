@@ -1,3 +1,5 @@
+![alt text](docs/ss1.png)
+
 # taskmon
 
 A lightweight system-stats overlay that sits on the right side of the Windows taskbar, just to the left of the system clock. Displays NET↑/↓, CPU, GPU, and RAM as live sparkline graphs — a replacement for TrafficMonitor / XMeters.
