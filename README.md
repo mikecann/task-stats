@@ -47,5 +47,4 @@ After editing any `.cs` file, just re-run `build-and-run.bat`.
 
 ## Known limitations
 
-- Brief 1–2 frame flicker when switching between maximised apps (separate compositor surface from the taskbar). See `FLICKER-RESEARCH.md` for investigation notes.
 - In exclusive-fullscreen mode the overlay may briefly disappear and return within ~100 ms.
