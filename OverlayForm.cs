@@ -289,7 +289,7 @@ public class OverlayForm : Form {
     void BuildNotifyIcon() {
         _notify = new NotifyIcon {
             Icon             = MakeAppIcon(),
-            Text             = "taskmon",
+            Text             = "task-stats",
             ContextMenuStrip = _menu,
             Visible          = true
         };

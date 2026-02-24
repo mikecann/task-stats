@@ -38,7 +38,7 @@ public class SettingsForm : Form {
         _d    = s.Clone();
         _host = host;
 
-        Text            = "taskmon \u2014 Settings";
+        Text            = "task-stats \u2014 Settings";
         Size            = new Size(460, 460);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox     = MinimizeBox = false;
@@ -243,7 +243,7 @@ public class SettingsForm : Form {
         y += 6;
         SecHead(p, "bullet_go", "Startup", ref y);
         _cbStartup = new CheckBox {
-            Text     = "Launch taskmon automatically when Windows starts",
+            Text     = "Launch task-stats automatically when Windows starts",
             Location = new Point(18, y), Size = new Size(400, 20),
             Checked  = _d.RunOnStartup
         };

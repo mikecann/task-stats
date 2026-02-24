@@ -25,13 +25,13 @@ class DarkRenderer : ToolStripProfessionalRenderer {
 }
 
 // =============================================================================
-// App -- entry point called by taskmon.ps1
+// App -- entry point called by task-stats.ps1
 // =============================================================================
 public static class App {
     const string REG_KEY  = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string REG_NAME = "taskmon";
+    const string REG_NAME = "task-stats";
 
-    // scriptDir is passed from taskmon.ps1 ($PSScriptRoot) so we can find taskmon.vbs.
+    // scriptDir is passed from task-stats.ps1 ($PSScriptRoot) so we can find task-stats.vbs.
     public static void Run(string scriptDir = null) {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -52,7 +52,7 @@ public static class App {
             using (var key = Registry.CurrentUser.OpenSubKey(REG_KEY, writable: true)) {
                 if (key == null) return;
                 if (enable) {
-                    var vbs = Path.Combine(scriptDir, "taskmon.vbs");
+                    var vbs = Path.Combine(scriptDir, "task-stats.vbs");
                     key.SetValue(REG_NAME,
                         string.Format("wscript.exe \"{0}\"", vbs));
                 } else {

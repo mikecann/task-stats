@@ -30,7 +30,7 @@ public class Settings {
     public int    UpdateIntervalMs = 1000;
     // 1.0 = fully opaque; 0.5 = 50% transparent (lets you see icons beneath).
     public double Opacity          = 1.0;
-    // Launch taskmon automatically when Windows starts.
+    // Launch task-stats automatically when Windows starts.
     public bool   RunOnStartup     = true;
 
     // -- Sparkline colours (HTML hex) -----------------------------------------
@@ -45,7 +45,7 @@ public class Settings {
     static string FilePath { get {
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "taskmon", "settings.json");
+            "task-stats", "settings.json");
     }}
 
     public static Settings Load() {
@@ -67,7 +67,7 @@ public class Settings {
     string Serialize() {
         var b = new StringBuilder();
         b.AppendLine("{");
-        b.AppendLine("  \"_info\": \"taskmon settings -- edit here or use right-click > Settings in the overlay\",");
+        b.AppendLine("  \"_info\": \"task-stats settings -- edit here or use right-click > Settings in the overlay\",");
         b.AppendLine();
         b.AppendLine("  \"_display\": \"which panels appear in the taskbar overlay\",");
         Jb(b, "ShowNetUp",      ShowNetUp);

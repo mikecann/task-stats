@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-echo Stopping any running taskmon instance...
+echo Stopping any running task-stats instance...
 call "%~dp0kill.bat"
 
 set MSBUILD=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe
@@ -12,8 +12,8 @@ if not exist "%MSBUILD%" (
     exit /b 1
 )
 
-echo Building taskmon.csproj ...
-"%MSBUILD%" "%~dp0taskmon.csproj" /nologo /v:minimal /p:Configuration=Release
+echo Building task-stats.csproj ...
+"%MSBUILD%" "%~dp0task-stats.csproj" /nologo /v:minimal /p:Configuration=Release
 
 if %errorlevel% neq 0 (
     echo.
@@ -23,5 +23,5 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo Build succeeded: %LOCALAPPDATA%\taskmon\taskmon.dll
-echo You can now launch taskmon via taskmon.vbs
+echo Build succeeded: %LOCALAPPDATA%\task-stats\task-stats.dll
+echo You can now launch task-stats via task-stats.vbs
