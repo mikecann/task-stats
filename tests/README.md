@@ -75,6 +75,19 @@ Relevant keys:
 - `OPENROUTER_API_KEY`
 - `TASK_STATS_VISION_MODEL`
 
+Copy `.env.example` to `.env` at this clone's root. The overlay and the
+deterministic `-SkipAI` pass need no keys. For the paid judge, install Bun and run
+`bun install` from `tests/e2e` before running `run-e2e-tests.bat`.
+
+The judge's repo-path regression test uses a temporary clone and a mocked fetch,
+so it makes no network requests and needs no secrets:
+
+```powershell
+cd tests/e2e
+bun install --frozen-lockfile
+bun test
+```
+
 Default model:
 
 ```text
@@ -82,6 +95,20 @@ google/gemini-2.5-flash-lite
 ```
 
 That keeps the visual pass cheap enough to run when you actually need it.
+
+## CI and platform
+
+The .NET test projects are custom console runners. `dotnet test` does not discover
+their assertions; run the batch commands above or `dotnet run --project` for each
+test project. CI builds all four projects on Windows, runs the unit and integration
+runners, parses every PowerShell script and runs the mocked Bun regression test.
+It does not run the paid judge or require an NVIDIA GPU. The existing live-counter
+tests may skip when counters or measurable network activity are unavailable.
+
+The app, integration tests and visual harness need Windows. macOS can parse the
+PowerShell scripts, run the Bun regression test and cross-build with
+`-p:EnableWindowsTargeting=true -p:UseAppHost=false`, with `LOCALAPPDATA` set to a
+writable temporary directory.
 
 ## Artifacts
 

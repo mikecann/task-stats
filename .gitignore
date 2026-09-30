@@ -1,0 +1,20 @@
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# .NET build output
+**/bin/
+**/obj/
+build/
+dist/
+*.exe
+*.dll
+*.pdb
+.vs/
+
+# Optional Bun visual-test dependencies and generated screenshots
+node_modules/
+tests/e2e/artifacts/
+*.log

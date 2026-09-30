@@ -16,8 +16,8 @@ function Load-DotEnv($RepoRoot) {
     }
 }
 
-$RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
-$ToolRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$ToolRoot   = $RepoRoot
 $Artifacts  = Join-Path $PSScriptRoot "artifacts"
 $VisualProj = Join-Path $ToolRoot 'tests\visual\TaskStats.VisualHarness.csproj'
 $VisualExe  = Join-Path $env:LOCALAPPDATA 'task-stats-tests\visual\TaskStats.VisualHarness.exe'

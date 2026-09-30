@@ -46,12 +46,12 @@ static class IntegrationTests {
     }
 
     static void RegistryStartupRegistrationWritesAndRemovesStartupValue() {
-        const string subKeyPath = @"Software\mikerosoft\task-stats-tests\Run";
+        const string subKeyPath = @"Software\task-stats-tests\Run";
         const string valueName = "task-stats-test";
         var registration = new RegistryStartupRegistration(Registry.CurrentUser, subKeyPath, valueName);
 
         try {
-            registration.Apply(true, @"C:\dev\me\mikerosoft\tools\task-stats");
+            registration.Apply(true, @"C:\dev\task-stats");
 
             using (var key = Registry.CurrentUser.OpenSubKey(subKeyPath, false)) {
                 AssertEx.True(key != null, "The integration test subkey should exist after enabling startup");
@@ -61,7 +61,7 @@ static class IntegrationTests {
                     "The startup command should point at task-stats.vbs");
             }
 
-            registration.Apply(false, @"C:\dev\me\mikerosoft\tools\task-stats");
+            registration.Apply(false, @"C:\dev\task-stats");
 
             using (var key = Registry.CurrentUser.OpenSubKey(subKeyPath, false)) {
                 if (key != null) {
@@ -69,7 +69,7 @@ static class IntegrationTests {
                 }
             }
         } finally {
-            Registry.CurrentUser.DeleteSubKeyTree(@"Software\mikerosoft\task-stats-tests", false);
+            Registry.CurrentUser.DeleteSubKeyTree(@"Software\task-stats-tests", false);
         }
     }
 

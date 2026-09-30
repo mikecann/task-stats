@@ -5,7 +5,7 @@ import { readdirSync, readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const repoRoot = resolve(import.meta.dirname, '..', '..', '..', '..');
+const repoRoot = resolve(import.meta.dirname, '..', '..');
 const artifactsDir = resolve(process.argv[2] ?? join(import.meta.dirname, 'artifacts'));
 
 configDotenv({ path: join(repoRoot, '.env'), quiet: true });
@@ -68,8 +68,8 @@ async function evaluateManifest(manifest: Manifest): Promise<VisionResult> {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://github.com/mikecann/mikerosoft',
-      'X-Title': 'mikerosoft/task-stats-visual-tests',
+      'HTTP-Referer': 'https://github.com/mikecann/task-stats',
+      'X-Title': 'task-stats-visual-tests',
     },
     body: JSON.stringify({
       model: DEFAULT_MODEL,
